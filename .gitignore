@@ -29,3 +29,6 @@
 ncs_env.sh
 /.claude/
 .mcp.json
+CLAUDE.md
+# Local agent instructions
+nrf54/CLAUDE.md
