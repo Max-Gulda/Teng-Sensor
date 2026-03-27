@@ -1,0 +1,31 @@
+# --- Zephyr / nRF Connect / west ---
+/nrf54/build*/
+/nrf54/.west/
+/nrf54/.cache/
+/nrf54/.ccls-cache/
+/nrf54/.settings/
+
+# If someone still builds at repo root by accident
+/build*/
+
+# --- IDE / tooling ---
+.DS_Store
+.idea/
+.clangd
+
+# --- Python / uv (GUI) ---
+/gui/.venv/
+/gui/.python-version
+/gui/.pytest_cache/
+/gui/.mypy_cache/
+/gui/.ruff_cache/
+/gui/**/__pycache__/
+/gui/**/.ipynb_checkpoints/
+/gui/dist/
+/gui/build/
+/gui/*.egg-info/
+
+# --- Repo-local agent/tooling files ---
+ncs_env.sh
+/.claude/
+.mcp.json

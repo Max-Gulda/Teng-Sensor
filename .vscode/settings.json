@@ -1,0 +1,6 @@
+{
+  // use VS Code C/C++ extension IntelliSense.
+  "C_Cpp.intelliSenseEngine": "default",
+  "C_Cpp.default.compileCommands": "${workspaceFolder}/nrf54/build/compile_commands.json",
+  "C_Cpp.default.configurationProvider": "nordic-semiconductor.nrf-connect"
+}

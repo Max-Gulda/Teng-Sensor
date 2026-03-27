@@ -1,0 +1,168 @@
+// To get started, press Ctrl+Space to bring up the completion menu and view the available nodes.
+
+// You can also use the buttons in the sidebar to perform actions on nodes.
+// Actions currently available include:
+
+// * Enabling / disabling the node
+// * Adding the bus to a bus
+// * Removing the node
+// * Connecting ADC channels
+
+// For more help, browse the DeviceTree documentation at https: //docs.zephyrproject.org/latest/guides/dts/index.html
+// You can also visit the nRF DeviceTree extension documentation at https: //docs.nordicsemi.com/bundle/nrf-connect-vscode/page/guides/ncs_configure_app.html#devicetree-support-in-the-extension
+/* uart20 is being used for serial communication, so use spi21*/
+
+/ {
+    zephyr,user {
+        /* LSM6DSO interrupt pins: INT1=P1.05, INT2=P1.06 */
+        int1-gpios = <&gpio1 5 GPIO_ACTIVE_HIGH>;
+        int2-gpios = <&gpio1 6 GPIO_ACTIVE_HIGH>;
+    };
+};
+
+&gpio1 {
+    status = "okay";
+};
+
+&spi21 {
+    status = "okay";
+    cs-gpios = <&gpio1 4 GPIO_ACTIVE_LOW>, <&gpio1 12 GPIO_ACTIVE_LOW>; /* P1.04 IMU, P1.12 ADC */
+    pinctrl-0 = <&spi21_default>;
+    pinctrl-1 = <&spi21_sleep>;
+    pinctrl-names = "default", "sleep";
+};
+
+
+
+&pinctrl {
+    spi21_default: spi21_default {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 1, 11)>,   /* P1.11 */
+                    <NRF_PSEL(SPIM_MOSI, 1, 13)>,  /* P1.14 */
+                    <NRF_PSEL(SPIM_MISO, 1, 14)>;  /* P1.13 */
+        };
+    };
+
+    spi21_sleep: spi21_sleep {
+        group1 {
+            psels = <NRF_PSEL(SPIM_SCK, 1, 11)>,
+                    <NRF_PSEL(SPIM_MOSI, 1, 13)>,
+                    <NRF_PSEL(SPIM_MISO, 1, 14)>;
+            low-power-enable;
+        };
+    };
+
+
+};
+
+/* Enable GRTC for 8.192 MHz clock output on P1.12 (ADC external clock) */
+&grtc {
+    status = "okay";
+    clkout-fast-frequency-hz = <8000000>;  /* 8.192 MHz */
+    pinctrl-0 = <&grtc_default>;
+    pinctrl-1 = <&grtc_sleep>;
+    pinctrl-names = "default", "sleep";
+};
+
+/* Configure GRTC clock output pin */
+&pinctrl {
+    grtc_default: grtc_default {
+        group1 {
+            psels = <NRF_PSEL(GRTC_CLKOUT_FAST, 1, 8)>;
+        };
+    };
+
+    grtc_sleep: grtc_sleep {
+        group1 {
+            psels = <NRF_PSEL(GRTC_CLKOUT_FAST, 1, 8)>;
+            low-power-enable;
+        };
+    };
+};
+
+
+
+&nfct {
+    status = "disabled";
+};
+
+
+&button0 {
+    status = "disabled";
+};
+
+/* Disable Button 1 to free P1.09 for ADS131M02 DRDY pin */
+&button1 {
+    status = "disabled";
+};
+
+/* Disable Button 2 to free P1.08 for ADS131M02 CS pin */
+&button2 {
+    status = "disabled";
+};
+
+/* Disable Button 3 to free P1.10 for ADS131M02 RESET pin */
+&button3 {
+    status = "disabled";
+};
+
+&uart20 {
+    //current-speed = <115200>;
+    status = "disabled";
+};
+
+&ieee802154 {
+    status = "disabled";
+};
+
+&nfct {
+    status = "disabled";
+};
+
+&temp {
+    status = "disabled";
+};
+
+&dppic00 {
+    status = "disabled";
+};
+
+&adc {
+    status = "disabled";
+};
+
+&pwm20 {
+    status = "disabled";
+};
+
+
+&dppic10 {
+    status = "disabled";
+};
+
+&dppic20 {
+    status = "disabled";
+};
+
+&dppic30 {
+    status = "disabled";
+};
+
+&radio {
+    status = "disabled";
+};
+&led3 {
+    status = "disabled";
+};
+
+&led2 {
+    status = "disabled";
+};
+
+&led1 {
+    status = "disabled";
+};
+
+&led0 {
+    status = "disabled";
+};
