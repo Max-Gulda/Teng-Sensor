@@ -289,9 +289,6 @@ class App(QtWidgets.QWidget):
         self._rr = QtWidgets.QLabel("-")
         self._ecg = QtWidgets.QLabel("-")
         self._imu = QtWidgets.QLabel("-")
-        self._log = QtWidgets.QPlainTextEdit()
-        self._log.setReadOnly(True)
-        self._log.setMaximumBlockCount(500)
 
         header = QtWidgets.QGridLayout()
         header.setColumnStretch(1, 1)
@@ -310,9 +307,6 @@ class App(QtWidgets.QWidget):
         header.addWidget(self._bpm, 3, 1)
         header.addWidget(QtWidgets.QLabel("RR interval (ms):"), 4, 0)
         header.addWidget(self._rr, 4, 1)
-
-        header.addWidget(QtWidgets.QLabel("Log:"), 5, 0, QtCore.Qt.AlignmentFlag.AlignTop)
-        header.addWidget(self._log, 5, 1)
 
         buttons = QtWidgets.QHBoxLayout()
         self._btn_scan = QtWidgets.QPushButton("Scan")
