@@ -57,6 +57,10 @@ LOG_* / printk ─────────────────────�
 
 ## Build and run (VS Code + nRF Connect extension)
 
+### Important (VS Code workspace)
+
+When using the **nRF Connect for VS Code** extension, make sure the **opened workspace folder is `nrf54/`** (not the repo root). Otherwise the extension may not detect the application correctly.
+
 ### Prerequisites
 
 - VS Code

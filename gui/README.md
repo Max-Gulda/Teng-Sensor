@@ -20,4 +20,5 @@ uv run ecg-belt-gui
 
 - The firmware device name is expected to be `ECG_Belt`.
 - BLE UUIDs are defined in `nrf54/src/bluetooth/bluetooth.c`.
+- GUI toolkit: Qt via `PySide6`.
 
