@@ -133,15 +133,15 @@ typedef struct {
 #define ADS131M04_PWR_LOW_POWER       1
 #define ADS131M04_PWR_HIGH_RESOLUTION 2
 
-/* PGA Gain settings */
-#define ADS131M04_GAIN_1    0b000
-#define ADS131M04_GAIN_2    0b001
-#define ADS131M04_GAIN_4    0b010
-#define ADS131M04_GAIN_8    0b011
-#define ADS131M04_GAIN_16   0b100
-#define ADS131M04_GAIN_32   0b101
-#define ADS131M04_GAIN_64   0b110
-#define ADS131M04_GAIN_128  0b111
+/* PGA Gain multipliers (user-facing values) */
+#define ADS131M04_GAIN_1    1
+#define ADS131M04_GAIN_2    2
+#define ADS131M04_GAIN_4    4
+#define ADS131M04_GAIN_8    8
+#define ADS131M04_GAIN_16   16
+#define ADS131M04_GAIN_32   32
+#define ADS131M04_GAIN_64   64
+#define ADS131M04_GAIN_128  128
 
 /* Register masks - GAIN */
 #define ADS131M04_REGMASK_GAIN_PGAGAIN3 0x7000

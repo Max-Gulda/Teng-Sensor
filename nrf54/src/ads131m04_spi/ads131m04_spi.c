@@ -97,6 +97,41 @@ static int32_t get_channel_sample(const ads131m04_data_t *data, uint8_t channel)
     }
 }
 
+static int ads131m04_gain_to_reg_value(uint8_t gain_x, uint8_t *reg_value) {
+    if (reg_value == NULL) {
+        return -EINVAL;
+    }
+
+    switch (gain_x) {
+        case ADS131M04_GAIN_1:
+            *reg_value = 0b000;
+            return 0;
+        case ADS131M04_GAIN_2:
+            *reg_value = 0b001;
+            return 0;
+        case ADS131M04_GAIN_4:
+            *reg_value = 0b010;
+            return 0;
+        case ADS131M04_GAIN_8:
+            *reg_value = 0b011;
+            return 0;
+        case ADS131M04_GAIN_16:
+            *reg_value = 0b100;
+            return 0;
+        case ADS131M04_GAIN_32:
+            *reg_value = 0b101;
+            return 0;
+        case ADS131M04_GAIN_64:
+            *reg_value = 0b110;
+            return 0;
+        case ADS131M04_GAIN_128:
+            *reg_value = 0b111;
+            return 0;
+        default:
+            return -EINVAL;
+    }
+}
+
 static int ads131m04_set_channel_offset_calibration(ads131m04_config_t *config, uint8_t channel,
     int32_t offset) {
     uint32_t raw_offset = (uint32_t)offset & 0x00FFFFFF;
@@ -236,10 +271,9 @@ int ads131m04_send_command(ads131m04_config_t *config, uint16_t cmd, uint16_t *r
 int ads131m04_read_register(ads131m04_config_t *config, uint8_t address, uint16_t *value) {
     int ret;
     uint16_t cmd = ADS131M04_CMD_READ_REG | (address << 7);
+    size_t resp_offset = ADS131M04_MSG_LEN_ONE;
     uint8_t tx_buf[ADS131M04_MSG_LEN_TWO] = { 0 };
     uint8_t rx_buf[ADS131M04_MSG_LEN_TWO] = { 0 };
-    uint8_t tx_nop[ADS131M04_MSG_LEN_TWO] = { 0 };
-    uint8_t rx_nop[ADS131M04_MSG_LEN_TWO] = { 0 };
 
     tx_buf[0] = (cmd >> 8) & 0xFF;
     tx_buf[1] = cmd & 0xFF;
@@ -249,15 +283,12 @@ int ads131m04_read_register(ads131m04_config_t *config, uint8_t address, uint16_
         return ret;
     }
 
-    tx_nop[0] = (ADS131M04_CMD_NULL >> 8) & 0xFF;
-    tx_nop[1] = ADS131M04_CMD_NULL & 0xFF;
-    ret = spi_write_read(config->spi_dev, &config->spi_cfg, tx_nop, rx_nop, ADS131M04_MSG_LEN_TWO);
-    if (ret < 0) {
-        return ret;
-    }
-
-    *value = (rx_nop[ADS131M04_MSG_LEN_TWO / 2] << 8) |
-             rx_nop[ADS131M04_MSG_LEN_TWO / 2 + 1];
+    /*
+     * For a single-register read, the requested register contents are returned
+     * in the response word of the frame immediately following the RREG
+     * command. The second 18-byte half of this transfer is that next frame.
+     */
+    *value = (rx_buf[resp_offset] << 8) | rx_buf[resp_offset + 1];
 
     LOG_DBG("Read reg 0x%02x = 0x%04x", address, *value);
     return 0;
@@ -302,7 +333,7 @@ int ads131m04_write_register_masked(ads131m04_config_t *config, uint8_t address,
         shift++;
     }
 
-    reg_contents |= (value << shift);
+    reg_contents |= ((value << shift) & mask);
 
     ret = ads131m04_write_register(config, address, reg_contents);
     if (ret < 0) {
@@ -398,23 +429,26 @@ int ads131m04_set_power_mode(ads131m04_config_t *config, uint8_t power_mode) {
 }
 
 int ads131m04_set_channel_gain(ads131m04_config_t *config, uint8_t channel, uint8_t gain) {
+    uint8_t gain_reg_value;
+
     if (channel >= ADS131M04_NUM_CHANNELS) {
         LOG_ERR("Invalid channel: %d", channel);
         return -EINVAL;
     }
 
-    if (gain > 0x07) {
-        LOG_ERR("Invalid gain: %d", gain);
+    if (ads131m04_gain_to_reg_value(gain, &gain_reg_value) < 0) {
+        LOG_ERR("Invalid gain multiplier: %u", gain);
         return -EINVAL;
     }
 
-    int ret = ads131m04_write_register_masked(config, ADS131M04_REG_GAIN, gain, gain_masks[channel]);
+    int ret = ads131m04_write_register_masked(config, ADS131M04_REG_GAIN,
+        gain_reg_value, gain_masks[channel]);
     if (ret < 0) {
         LOG_ERR("Failed to set channel %d gain: %d", channel, ret);
         return ret;
     }
 
-    LOG_INF("Channel %d gain set to %d", channel, gain);
+    LOG_INF("Channel %d gain set to %ux", channel, gain);
     return 0;
 }
 
@@ -807,7 +841,7 @@ int ads131m04_full_setup(ads131m04_config_t *config) {
         return err;
     }
 
-    err = ads131m04_set_channel_gain(config, 0, ADS131M04_GAIN_4);
+    err = ads131m04_set_channel_gain(config, 0, ADS131M04_GAIN_8);
     if (err < 0) {
         LOG_ERR("Failed to set CH0 gain (%d)\n", err);
         return err;
