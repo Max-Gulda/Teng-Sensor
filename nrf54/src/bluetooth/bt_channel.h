@@ -3,7 +3,7 @@
  * @brief Generic Bluetooth channel pipeline — internal to src/bluetooth/.
  *
  * Defines the shared types and pipeline function declarations used by all
- * data channels (ECG, IMU). Not part of the public API.
+ * data channels (ADC, raw ECG, IMU). Not part of the public API.
  */
 
 #ifndef BT_CHANNEL_H
@@ -15,12 +15,12 @@
 #include <stdbool.h>
 #include <stddef.h>
 
- /* Fixed payload size for DLQ entries.
- *   ECG:    20 samples × 8 bytes  = 160 bytes
-  *   RAW ECG: 20 samples × 8 bytes = 160 bytes (optional)
-  *   IMU: 15 samples × 16 bytes = 240 bytes
-  * A _Static_assert in bluetooth.c validates this at compile time.
-  */
+/* Fixed payload size for DLQ entries.
+ *   ADC:     12 samples × 20 bytes = 240 bytes
+ *   RAW ECG: 20 samples × 8 bytes  = 160 bytes (optional)
+ *   IMU:     15 samples × 16 bytes = 240 bytes
+ * A _Static_assert in bluetooth.c validates this at compile time.
+ */
 #define BT_MAX_BATCH_PAYLOAD 240
 
   /* DLQ entry: fixed-size payload buffer sized for the largest channel batch */

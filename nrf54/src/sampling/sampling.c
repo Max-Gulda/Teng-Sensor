@@ -21,7 +21,7 @@
 LOG_MODULE_REGISTER(sampling, LOG_LEVEL_INF);
 
 /* Global ADC configuration */
-static ads131m02_config_t *g_adc_config = NULL;
+static ads131m04_config_t *g_adc_config = NULL;
 static lsm6dso_config_t *g_imu_config = NULL;
 
 /* Sampling statistics */
@@ -33,7 +33,7 @@ static volatile uint32_t imu_read_failures = 0;
 static volatile uint32_t adc_read_failures = 0;
 static volatile uint32_t adc_frame_outliers = 0;
 static bool have_last_valid_adc = false;
-static ads131m02_data_t last_valid_adc = { 0 };
+static ads131m04_data_t last_valid_adc = { 0 };
 
 /* Synchronization: Timer signals thread via semaphore */
 K_SEM_DEFINE(sampling_sem, 0, 1);
@@ -42,21 +42,44 @@ K_SEM_DEFINE(sampling_sem, 0, 1);
 static void sampling_timer_handler(struct k_timer *timer);
 K_TIMER_DEFINE(sampling_timer, sampling_timer_handler, NULL);
 
-static inline bool adc_sample_is_rail_value(const ads131m02_data_t *adc) {
-    return (adc->ch0 == 8388607) || (adc->ch0 == -8388608) ||
-           (adc->ch1 == 8388607) || (adc->ch1 == -8388608);
+static inline bool adc_value_is_rail(int32_t sample) {
+    return (sample == 8388607) || (sample == -8388608);
 }
 
-static inline int read_adc_frame(ads131m02_data_t *adc) {
-    int err = ads131m02_read_adc(g_adc_config, adc);
+static inline int32_t get_ecg_source_sample(const ads131m04_data_t *adc) {
+    switch (ECG_SOURCE_ADC_CHANNEL) {
+        case 0:
+            return adc->ch0;
+        case 1:
+            return adc->ch1;
+        case 2:
+            return adc->ch2;
+        case 3:
+            return adc->ch3;
+        default:
+            return adc->ch0;
+    }
+}
+
+static inline bool adc_ecg_source_is_rail_value(const ads131m04_data_t *adc) {
+    return adc_value_is_rail(get_ecg_source_sample(adc));
+}
+
+static inline int read_adc_frame(ads131m04_data_t *adc) {
+    int err = ads131m04_read_adc(g_adc_config, adc);
     if (err < 0) {
         return err;
     }
 
-    if (adc_sample_is_rail_value(adc)) {
-        ads131m02_data_t retry;
-        err = ads131m02_read_adc(g_adc_config, &retry);
-        if (err == 0 && !adc_sample_is_rail_value(&retry)) {
+    /*
+     * Keep all four channels enabled and streamed, but only reject a frame if
+     * the ECG source channel itself rails. On the current PCB, CH1-CH3 are
+     * floating, so they should not poison the entire frame.
+     */
+    if (adc_ecg_source_is_rail_value(adc)) {
+        ads131m04_data_t retry;
+        err = ads131m04_read_adc(g_adc_config, &retry);
+        if (err == 0 && !adc_ecg_source_is_rail_value(&retry)) {
             *adc = retry;
             return 0;
         }
@@ -107,7 +130,7 @@ static void sampling_thread(void *arg1, void *arg2, void *arg3) {
     ARG_UNUSED(arg1);
     ARG_UNUSED(arg2);
     ARG_UNUSED(arg3);
-    ads131m02_data_t adc;
+    ads131m04_data_t adc;
     LOG_INF("Sampling thread started (priority %d)", SAMPLING_THREAD_PRIORITY);
 
     while (1) {
@@ -123,12 +146,13 @@ static void sampling_thread(void *arg1, void *arg2, void *arg3) {
         }
 
         /* Perform ADC sampling (in thread context - SPI can work!) */
-        if (read_adc_frame(&adc) == 0) {
+        int adc_err = read_adc_frame(&adc);
+        if (adc_err == 0) {
             last_valid_adc = adc;
             have_last_valid_adc = true;
         } else {
             adc_read_failures++;
-            LOG_WRN("ADC read failed (%u)", adc_read_failures);
+            LOG_WRN("ADC read failed (%u, err %d)", adc_read_failures, adc_err);
             
             if (have_last_valid_adc) {
                 adc = last_valid_adc;
@@ -136,16 +160,17 @@ static void sampling_thread(void *arg1, void *arg2, void *arg3) {
                 LOG_WRN("ADC frame fallback used (%u)", adc_frame_outliers);
                 
             } else {
-                adc.ch1 = 0;
                 adc.ch0 = 0;
+                adc.ch1 = 0;
+                adc.ch2 = 0;
+                adc.ch3 = 0;
             }
         }
 
-        int32_t heart = adc.ch1;
-        int32_t adc_aux = adc.ch0;
+        int32_t heart = get_ecg_source_sample(&adc);
 
-        /* Send data to Bluetooth thread - CRITICAL: Cannot drop samples! */
-        (void) bluetooth_queue_sample(heart, adc_aux, sample_count);
+        /* Send the full ADS131M04 frame to Bluetooth - CRITICAL: Cannot drop samples! */
+        (void) bluetooth_queue_sample(adc.ch0, adc.ch1, adc.ch2, adc.ch3, sample_count);
         /* Note: bluetooth.c handles all error logging and warnings */
         lsm6dso_data_t imu;
         if (read_imu(&imu) == 0) {
@@ -169,7 +194,7 @@ K_THREAD_DEFINE(sampling_thread_id, SAMPLING_THREAD_STACK_SIZE,
 
 /* ========== Public API Implementation ========== */
 
-int sampling_init(ads131m02_config_t *adc_config) {
+int sampling_init(ads131m04_config_t *adc_config) {
     if (adc_config == NULL) {
         LOG_ERR("ADC configuration is NULL");
         return -EINVAL;
@@ -193,7 +218,7 @@ int sampling_start(void) {
     adc_read_failures = 0;
     adc_frame_outliers = 0;
     have_last_valid_adc = false;
-    last_valid_adc = (ads131m02_data_t){ 0 };
+    last_valid_adc = (ads131m04_data_t){ 0 };
 
     LOG_INF("Starting time-synchronized sampling...");
 
@@ -237,7 +262,7 @@ void sampling_reset_stats(void) {
     adc_read_failures = 0;
     adc_frame_outliers = 0;
     have_last_valid_adc = false;
-    last_valid_adc = (ads131m02_data_t){ 0 };
+    last_valid_adc = (ads131m04_data_t){ 0 };
     LOG_INF("Sampling statistics reset");
 }
 

@@ -1,6 +1,6 @@
 /**
  * @file bt_ecg.h
- * @brief Primary ECG Bluetooth channel — internal header.
+ * @brief Main ADS131M04 Bluetooth channel — internal header.
  */
 
 #ifndef BT_ECG_H
@@ -13,30 +13,35 @@
 
 /*
  * Build-time switch for optional raw ECG characteristic.
- * 0: send only primary ECG channel on the custom data characteristic (default).
- * 1: also expose a separate raw ECG characteristic.
+ * 0: send only the main ADC characteristic.
+ * 1: also expose a separate raw ECG characteristic sourced from CH0.
  */
 #define BT_ENABLE_RAW_ECG_CHAR 1
 
- /* Primary ECG queue and batching configuration */
+/* Main ADC queue and batching configuration */
 #define BT_DATA_QUEUE_SIZE   512    /* Buffer 512 samples = 10.24 seconds @ 50Hz */
 #define BT_QUEUE_WARN_LEVEL  384    /* Warn when 75% full */
 #define BT_QUEUE_TIMEOUT_MS  100    /* Max wait time if queue full */
-#define BT_BATCH_SIZE        20     /* 20 samples × 8 bytes = 160 bytes */
+#define BT_BATCH_SIZE        12     /* 12 samples × 20 bytes = 240 bytes */
 #define BT_BATCH_TIMEOUT_MS  50     /* Max time to wait for a full batch */
 
 /* Sample queue entry — filled by the sampling thread */
 typedef struct {
-    int32_t heart;        /* Raw ECG sample (optional BLE characteristic) */
-    int32_t ecg_aux;      /* Secondary ADC channel (default BLE payload) */
-    uint32_t timestamp;   /* Sample number */
+    int32_t ch0;
+    int32_t ch1;
+    int32_t ch2;
+    int32_t ch3;
+    uint32_t timestamp;
 } bt_sample_data_t;
 
-/* Primary ECG packed BLE payload (8 bytes per sample) */
+/* Main ADC packed BLE payload (20 bytes per sample) */
 typedef struct {
     uint32_t sample_count;
-    int32_t ecg_aux;
-} __attribute__((packed)) ecg_data_t;
+    int32_t ch0;
+    int32_t ch1;
+    int32_t ch2;
+    int32_t ch3;
+} __attribute__((packed)) adc_data_t;
 
 /* Channel descriptor — used by bluetooth.c thread loop */
 extern bt_channel_t ecg_channel;

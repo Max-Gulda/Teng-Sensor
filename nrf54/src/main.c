@@ -5,7 +5,7 @@
  */
 
 #include <zephyr/kernel.h>
-#include "ads131m02_spi.h"
+#include "ads131m04_spi.h"
 #include "lsm6dso_spi.h"
 #include "sampling.h"
 #include "bluetooth.h"
@@ -18,10 +18,10 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 int main(void) {
     int err;
-    ads131m02_config_t *adc_config;
+    ads131m04_config_t *adc_config;
     lsm6dso_config_t *imu_config;
 
-    LOG_INF("=== ADS131M02 Task-Based Sampling @ %d Hz ===", SAMPLING_FREQUENCY_HZ);
+    LOG_INF("=== ADS131M04 Task-Based Sampling @ %d Hz ===", SAMPLING_FREQUENCY_HZ);
     
     /* ------------ INIT BLUETOOTH START ------------*/
 
@@ -45,18 +45,18 @@ int main(void) {
     //k_msleep(20000);
     /* ------------ INIT BLUETOOTH END ------------*/
 
-    /* ------------ INIT ADS131M02 START -------------*/
+    /* ------------ INIT ADS131M04 START -------------*/
     /* Get ADC configuration */
-    adc_config = ads131m02_get_config();
+    adc_config = ads131m04_get_config();
 
     /* Perform full ADC setup */
-    err = ads131m02_full_setup(adc_config);
+    err = ads131m04_full_setup(adc_config);
     if (err < 0) {
         LOG_ERR("Failed to setup ADC");
         return 0;
     }
 
-    /* ------------ INIT ADS131M02 END --------------*/
+    /* ------------ INIT ADS131M04 END --------------*/
 
     /* ------------ INIT LSM6DSO START -------------*/
 

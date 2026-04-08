@@ -91,17 +91,17 @@
     status = "disabled";
 };
 
-/* Disable Button 1 to free P1.09 for ADS131M02 DRDY pin */
+/* Disable Button 1 to free P1.09 for ADS131M04 DRDY pin */
 &button1 {
     status = "disabled";
 };
 
-/* Disable Button 2 to free P1.08 for ADS131M02 CS pin */
+/* Disable Button 2 to free P1.08 for ADS131M04 clock output */
 &button2 {
     status = "disabled";
 };
 
-/* Disable Button 3 to free P1.10 for ADS131M02 RESET pin */
+/* Disable Button 3 to free P1.10 for ADS131M04 RESET pin */
 &button3 {
     status = "disabled";
 };

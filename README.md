@@ -11,7 +11,7 @@ Minimal Zephyr RTOS firmware intended for the course **proprietary ECG belt boar
 
 The firmware samples:
 
-- **ADS131M02** 24-bit ADC (ECG + auxiliary ADC channel in the default BLE payload)
+- **ADS131M04** 24-bit ADC. All 4 ADC channels are enabled in the default firmware setup. CH0 is the ECG/heart input on this PCB and feeds the HR pipeline; CH1, CH2, and CH3 are currently floating on the board but are still streamed over BLE.
 - **LSM6DSO** 6-axis IMU (accel + gyro)
 
 It runs **Pan‑Tompkins** heart rate detection in real time and transmits data over **Bluetooth LE** (custom GATT characteristics + Nordic UART Service (NUS) for logs).
@@ -31,21 +31,21 @@ Created by:
 |---|---:|---|---|
 | Sampling | 5 | Reads ADC + IMU at the configured rate and queues data to BLE + ECG processing | `nrf54/src/sampling/sampling.c` |
 | ECG | 6 | Runs Pan‑Tompkins on the ECG stream; emits HR (and RR interval) over BLE | `nrf54/src/ecg/ecg.c`, `nrf54/src/pan_tompkins/` |
-| Bluetooth | 7 | Batches and transmits ECG/IMU notifications; manages connect/disconnect | `nrf54/src/bluetooth/bluetooth.c`, `nrf54/src/bluetooth/bt_*.c` |
+| Bluetooth | 7 | Batches and transmits ADC/raw-ECG/IMU notifications; manages connect/disconnect | `nrf54/src/bluetooth/bluetooth.c`, `nrf54/src/bluetooth/bt_*.c` |
 | Main | default | Initialization + periodic CPU load logging | `nrf54/src/main.c` |
 
 ### Data flow
 
 ```text
-ADS131M02 ──► sampling_thread ──► ecg_queue ──► ecg_thread ──► Pan‑Tompkins ──► BLE HR notifications
-                     └──────────► BLE ECG channel (batched notifications)
+ADS131M04 CH0 ─────► sampling_thread ──► ecg_queue ──► ecg_thread ──► Pan‑Tompkins ──► BLE HR notifications
+ADS131M04 CH0-CH3 ─► sampling_thread ───────────────────────────────────────────────► BLE ADC channel (batched notifications)
 LSM6DSO   ──► sampling_thread ───────────────► BLE IMU channel (batched notifications)
 LOG_* / printk ─────────────────────────────► NUS (BLE log backend)
 ```
 
 ### Source layout (firmware)
 
-- `nrf54/src/ads131m02_spi/` — ADS131M02 SPI driver + configuration
+- `nrf54/src/ads131m04_spi/` — ADS131M04 SPI driver + configuration
 - `nrf54/src/lsm6dso_spi/` — LSM6DSO SPI driver + configuration
 - `nrf54/src/sampling/` — timed sampling thread, queues to BLE + ECG
 - `nrf54/src/ecg/` — ECG thread + Pan‑Tompkins integration
@@ -54,6 +54,15 @@ LOG_* / printk ─────────────────────�
 - `nrf54/src/bluetooth/` — BLE GATT services, batching, queues, and HR notifications
 - `nrf54/src/ble_log_backend/` — routes Zephyr `LOG_*` output over BLE (NUS)
 - `nrf54/src/circ_buffer/` — static circular buffer utilities used by the ECG/Pan‑Tompkins path
+
+### ADS131M04 notes
+
+- The old `ads131m02_spi` module was renamed to `ads131m04_spi`.
+- The driver parses 4 ADC channels and exposes CH0, CH1, CH2, and CH3 in `ads131m04_data_t`.
+- The default setup in `ads131m04_full_setup()` enables all four channels.
+- CH0 is the ECG/heart channel on the PCB and is used for the raw ECG BLE characteristic and the HR pipeline.
+- CH1, CH2, and CH3 are currently floating on the PCB, so their plots/values are expected to be noisy or rail.
+- The main custom BLE ADC payload now carries timestamp + CH0 + CH1 + CH2 + CH3.
 
 ## Build and run (VS Code + nRF Connect extension)
 
@@ -135,4 +144,3 @@ cd gui
 uv sync
 uv run ecg-belt-gui
 ```
-

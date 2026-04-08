@@ -1,6 +1,6 @@
 /**
  * @file bluetooth.h
- * @brief Bluetooth Low Energy communication for ECG/raw-ECG/IMU data.
+ * @brief Bluetooth Low Energy communication for ADC/raw-ECG/IMU data.
  */
 
 #ifndef BLUETOOTH_H
@@ -28,7 +28,7 @@ typedef struct {
 
 /* Bluetooth statistics */
 typedef struct {
-    bt_channel_stats_t ecg;           /* Primary ECG channel statistics */
+    bt_channel_stats_t adc;           /* Primary ADC channel statistics */
     bt_channel_stats_t imu;           /* IMU channel statistics */
     uint32_t bt_disconnects;          /* Number of disconnections */
     bool connected;                   /* Current connection status */
@@ -53,17 +53,21 @@ int bluetooth_start(void);
 int bluetooth_stop(void);
 
 /**
- * @brief Queue one ADC sample pair for Bluetooth transmission.
+ * @brief Queue one ADS131M04 sample frame for Bluetooth transmission.
  *
- * Default build sends `ecg_aux` on the main custom data
- * characteristic. Raw heart/ECG is sent only when BT_ENABLE_RAW_ECG_CHAR=1.
+ * The main custom data characteristic carries CH0-CH3 from the ADS131M04.
+ * The optional raw ECG characteristic and the HR pipeline use CH0 as the
+ * ECG/heart source on this PCB.
  *
- * @param heart Raw heart/ECG signal value (optional BLE characteristic)
- * @param ecg_aux Secondary ADC channel value (default BLE payload)
+ * @param ch0 ADC channel 0 sample (ECG/heart on this PCB)
+ * @param ch1 ADC channel 1 sample
+ * @param ch2 ADC channel 2 sample
+ * @param ch3 ADC channel 3 sample
  * @param timestamp Sample number
  * @return 0 on success, -ENOMEM if queue is full
  */
-int bluetooth_queue_sample(int32_t heart, int32_t ecg_aux, uint32_t timestamp);
+int bluetooth_queue_sample(int32_t ch0, int32_t ch1, int32_t ch2, int32_t ch3,
+    uint32_t timestamp);
 
 /**
  * @brief Queue an IMU sample for Bluetooth transmission

@@ -4,12 +4,12 @@ cmake_minimum_required(VERSION 3.20.0)
 list(APPEND DTS_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
-project(ads131m02)
+project(ads131m04)
 
 # Add your application source
 target_sources(app PRIVATE
     src/main.c
-    src/ads131m02_spi/ads131m02_spi.c
+    src/ads131m04_spi/ads131m04_spi.c
     src/lsm6dso_spi/lsm6dso_spi.c
     src/sampling/sampling.c
     src/bluetooth/bluetooth.c
@@ -30,7 +30,7 @@ target_sources(app PRIVATE
 
 # Add include directories for module headers
 target_include_directories(app PRIVATE
-    src/ads131m02_spi
+    src/ads131m04_spi
     src/lsm6dso_spi
     src/sampling
     src/bluetooth

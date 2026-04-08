@@ -127,7 +127,7 @@ int lsm6dso_write_register_masked(lsm6dso_config_t *config, uint8_t reg,
 
     reg_val &= ~mask;
 
-    /* Auto-shift value to mask position (same convention as ADS131M02) */
+    /* Auto-shift value to mask position (same convention as ADS131M04) */
     uint8_t temp_mask = mask;
     int shift = 0;
     while (temp_mask && !(temp_mask & 0x01)) {
@@ -352,7 +352,7 @@ int lsm6dso_wait_for_int1(lsm6dso_config_t *config, uint32_t timeout_us) {
 
 /* ========== High-Level Configuration ========== */
 
-/* Static IMU configuration - shares SPI21 with ADS131M02 */
+/* Static IMU configuration - shares SPI21 with ADS131M04 */
 #define LSM6DSO_CS_IDX          0   /* cs-gpios index in spi21 node */
 
 static lsm6dso_config_t imu_config = {

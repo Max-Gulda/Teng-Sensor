@@ -38,8 +38,8 @@
 LOG_MODULE_REGISTER(bluetooth, LOG_LEVEL_INF);
 
 /* Compile-time checks: every channel batch must fit inside BT_MAX_BATCH_PAYLOAD. */
-_Static_assert(BT_BATCH_SIZE * sizeof(ecg_data_t) <= BT_MAX_BATCH_PAYLOAD,
-    "ECG batch payload exceeds BT_MAX_BATCH_PAYLOAD");
+_Static_assert(BT_BATCH_SIZE * sizeof(adc_data_t) <= BT_MAX_BATCH_PAYLOAD,
+    "ADC batch payload exceeds BT_MAX_BATCH_PAYLOAD");
 _Static_assert(BT_IMU_BATCH_SIZE * sizeof(imu_data_t) <= BT_MAX_BATCH_PAYLOAD,
     "IMU batch payload exceeds BT_MAX_BATCH_PAYLOAD");
 #if BT_ENABLE_RAW_ECG_CHAR
@@ -49,7 +49,7 @@ _Static_assert(BT_ECG_RAW_BATCH_SIZE * sizeof(ecg_raw_data_t) <= BT_MAX_BATCH_PA
 
 /* ========== UUIDs ========== */
 
-/* Custom 128-bit UUIDs for ECG/IMU service */
+/* Custom 128-bit UUIDs for ADC/IMU service */
 #define BT_UUID_ECG_SERVICE_VAL \
     BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x5678, 0x1234, 0x56789abcdef0)
 
@@ -87,7 +87,7 @@ static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_GAP_APPEARANCE, 0x40, 0x03),
     /* Standard HRS UUID so generic HR scanner apps can discover this device */
     BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_16_ENCODE(BT_UUID_HRS_VAL)),
-    /* Custom ECG/IMU service UUID */
+    /* Custom ADC/IMU service UUID */
     BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_ECG_SERVICE_VAL),
 };
 
@@ -199,11 +199,11 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 /* ========== GATT Service Definitions ========== */
 
 /*
- * Custom ECG/IMU service attribute indices:
+ * Custom ADC/IMU service attribute indices:
  *   [0]  Primary Service
- *   [1]  ECG Char Declaration  -> ecg_channel.gatt_attr_idx = 1
- *   [2]  ECG Char Value
- *   [3]  ECG CCC
+ *   [1]  ADC Char Declaration  -> ecg_channel.gatt_attr_idx = 1
+ *   [2]  ADC Char Value
+ *   [3]  ADC CCC
  *   [4]  IMU Char Declaration  -> imu_channel.gatt_attr_idx = 4
  *   [5]  IMU Char Value
  *   [6]  IMU CCC
@@ -268,7 +268,7 @@ BT_GATT_SERVICE_DEFINE(hrs_service,
 /**
  * @brief Bluetooth transmission thread.
  *
- * Blocks on the ECG queue with a timeout, then drains the IMU queue
+ * Blocks on the ADC queue with a timeout, then drains the IMU queue
  * non-blocking. Flushes partial batches for both channels on timeout.
  */
 static void bluetooth_thread(void *arg1, void *arg2, void *arg3) {
@@ -276,7 +276,7 @@ static void bluetooth_thread(void *arg1, void *arg2, void *arg3) {
     ARG_UNUSED(arg2);
     ARG_UNUSED(arg3);
 
-    LOG_INF("Bluetooth thread started (priority %d, ecg_batch=%d, imu_batch=%d)",
+    LOG_INF("Bluetooth thread started (priority %d, adc_batch=%d, imu_batch=%d)",
         BT_THREAD_PRIORITY, BT_BATCH_SIZE, BT_IMU_BATCH_SIZE);
 
     /* Initialise batch timers before entering the loop */
@@ -287,16 +287,16 @@ static void bluetooth_thread(void *arg1, void *arg2, void *arg3) {
     bt_imu_reset_on_connect();
 
     while (1) {
-        /* Block on ECG queue with timeout */
-        bt_sample_data_t ecg_sample;
-        int err = k_msgq_get(ecg_channel.queue, &ecg_sample, K_MSEC(BT_BATCH_TIMEOUT_MS));
+        /* Block on ADC queue with timeout */
+        bt_sample_data_t adc_sample;
+        int err = k_msgq_get(ecg_channel.queue, &adc_sample, K_MSEC(BT_BATCH_TIMEOUT_MS));
 
         if (err == 0) {
-            bt_ecg_process_sample(&ecg_sample);
+            bt_ecg_process_sample(&adc_sample);
         } else if (err == -EAGAIN) {
             bt_ecg_flush_if_timeout();
         } else {
-            LOG_ERR("Failed to get ECG sample from queue: %d", err);
+            LOG_ERR("Failed to get ADC sample from queue: %d", err);
         }
 
 #if BT_ENABLE_RAW_ECG_CHAR
@@ -382,7 +382,7 @@ void bluetooth_get_stats(bt_stats_t *stats) {
         return;
     }
 
-    bt_ecg_get_stats(&stats->ecg);
+    bt_ecg_get_stats(&stats->adc);
     bt_imu_get_stats(&stats->imu);
     stats->bt_disconnects = bt_disconnects;
     stats->connected = connected;
@@ -394,12 +394,12 @@ void bluetooth_print_stats(bt_stats_t *stats) {
     }
 
     LOG_INF("------ BT STATS ------");
-    LOG_INF("  ECG sent: %u", stats->ecg.samples_sent);
-    LOG_INF("  ECG overflow: %u", stats->ecg.queue_overflows);
-    LOG_INF("  ECG retries: %u", stats->ecg.batch_retries);
-    LOG_INF("  ECG stale: %u", stats->ecg.samples_discarded_stale);
-    LOG_INF("  ECG dlq: %u/%u overflows", stats->ecg.dlq_count, stats->ecg.dlq_overflows);
-    LOG_INF("  ECG queue: %u/%u", stats->ecg.current_queue_used, stats->ecg.max_queue_used);
+    LOG_INF("  ADC sent: %u", stats->adc.samples_sent);
+    LOG_INF("  ADC overflow: %u", stats->adc.queue_overflows);
+    LOG_INF("  ADC retries: %u", stats->adc.batch_retries);
+    LOG_INF("  ADC stale: %u", stats->adc.samples_discarded_stale);
+    LOG_INF("  ADC dlq: %u/%u overflows", stats->adc.dlq_count, stats->adc.dlq_overflows);
+    LOG_INF("  ADC queue: %u/%u", stats->adc.current_queue_used, stats->adc.max_queue_used);
     LOG_INF("  IMU sent: %u", stats->imu.samples_sent);
     LOG_INF("  IMU overflow: %u", stats->imu.queue_overflows);
     LOG_INF("  IMU retries: %u", stats->imu.batch_retries);

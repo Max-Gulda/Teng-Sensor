@@ -7,7 +7,7 @@
 #define SAMPLING_H
 
 #include <zephyr/kernel.h>
-#include "ads131m02_spi.h"
+#include "ads131m04_spi.h"
 #include "define.h"
 
 /* Sampling configuration */
@@ -32,7 +32,7 @@ typedef struct {
  * @param adc_config Pointer to ADC configuration
  * @return 0 on success, negative error code on failure
  */
-int sampling_init(ads131m02_config_t *adc_config);
+int sampling_init(ads131m04_config_t *adc_config);
 
 /**
  * @brief Start the sampling timer and thread

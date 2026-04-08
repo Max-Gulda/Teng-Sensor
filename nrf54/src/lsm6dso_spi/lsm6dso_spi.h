@@ -334,7 +334,7 @@ int lsm6dso_wait_for_int1(lsm6dso_config_t *config, uint32_t timeout_us);
  * - Set gyroscope to 104 Hz, +/-500 dps
  * - Enable data-ready interrupt on INT1 (accel + gyro)
  *
- * @note This device shares SPI21 with ADS131M02 (different CS pins).
+ * @note This device shares SPI21 with ADS131M04 (different CS pins).
  *       Ensure SPI transactions are not concurrent (e.g. read from same thread).
  *
  * @param config Pointer to device configuration (use lsm6dso_get_config())
