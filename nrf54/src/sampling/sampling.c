@@ -83,7 +83,7 @@ static inline int read_adc_frame(ads131m04_data_t *adc) {
             *adc = retry;
             return 0;
         }
-        return -EIO;
+        return -ERANGE;
     }
 
     return 0;
@@ -152,7 +152,11 @@ static void sampling_thread(void *arg1, void *arg2, void *arg3) {
             have_last_valid_adc = true;
         } else {
             adc_read_failures++;
-            LOG_WRN("ADC read failed (%u, err %d)", adc_read_failures, adc_err);
+            if (adc_err == -ERANGE) {
+                LOG_WRN("ADC ECG source railed (%u)", adc_read_failures);
+            } else {
+                LOG_WRN("ADC read failed (%u, err %d)", adc_read_failures, adc_err);
+            }
             
             if (have_last_valid_adc) {
                 adc = last_valid_adc;
