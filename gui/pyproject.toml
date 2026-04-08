@@ -1,7 +1,7 @@
 [project]
 name = "ecg-belt-gui"
 version = "0.1.0"
-description = "Super simple GUI for ECG belt BLE streams"
+description = "Super simple GUI for ECG belt BLE streams with four-channel ADS131M04 support"
 requires-python = ">=3.11"
 dependencies = [
   "bleak>=0.22.0",
@@ -18,4 +18,3 @@ packages = ["src/ecg_belt_gui"]
 
 [project.scripts]
 ecg-belt-gui = "ecg_belt_gui.app:main"
-

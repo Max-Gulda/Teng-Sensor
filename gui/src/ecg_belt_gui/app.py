@@ -98,7 +98,7 @@ class BleStreamThread(QtCore.QThread):
     connectionChanged = QtCore.Signal(bool)
     hrmReady = QtCore.Signal(object)      # bytes
     ecgRawReady = QtCore.Signal(object)   # bytes
-    ecgAuxReady = QtCore.Signal(object)   # bytes
+    adcFrameReady = QtCore.Signal(object) # bytes
     imuReady = QtCore.Signal(object)      # bytes
     deviceNameReady = QtCore.Signal(str)
     nusLogReady = QtCore.Signal(str)
@@ -145,9 +145,9 @@ class BleStreamThread(QtCore.QThread):
                 if self._running:
                     self.ecgRawReady.emit(bytes(data))
 
-            def on_ecg_aux(_s, data: bytearray):
+            def on_adc_frame(_s, data: bytearray):
                 if self._running:
-                    self.ecgAuxReady.emit(bytes(data))
+                    self.adcFrameReady.emit(bytes(data))
 
             def on_imu(_s, data: bytearray):
                 if self._running:
@@ -163,14 +163,14 @@ class BleStreamThread(QtCore.QThread):
 
             await client.start_notify(UUID_HR_MEASUREMENT, on_hrm)
             await client.start_notify(UUID_ECG_RAW_DATA, on_ecg)
-            await client.start_notify(UUID_ECG_DATA, on_ecg_aux)
+            await client.start_notify(UUID_ECG_DATA, on_adc_frame)
             await client.start_notify(UUID_IMU_DATA, on_imu)
             try:
                 await client.start_notify(UUID_NUS_TX, on_nus)
                 self.statusMessage.emit("NUS log stream enabled.")
             except Exception:
                 pass
-            self.statusMessage.emit("Streaming started.")
+            self.statusMessage.emit("Streaming started. GUI shows raw ECG from CH0 plus ADS131M04 CH0-CH3.")
 
             while self._running and client.is_connected:
                 await asyncio.sleep(0.1)
@@ -185,9 +185,9 @@ class BleStreamThread(QtCore.QThread):
 
 # Custom service UUIDs (see nrf54/src/bluetooth/bluetooth.c)
 UUID_ECG_SERVICE = "12345678-1234-5678-1234-56789abcdef0"
-UUID_ECG_DATA = "12345678-1234-5678-1234-56789abcdef1"      # ecg_data_t batches (timestamp + ecg_aux)
+UUID_ECG_DATA = "12345678-1234-5678-1234-56789abcdef1"      # adc_data_t batches (timestamp + ch0-ch3)
 UUID_IMU_DATA = "12345678-1234-5678-1234-56789abcdef2"      # imu_data_t batches
-UUID_ECG_RAW_DATA = "12345678-1234-5678-1234-56789abcdef3"  # ecg_raw_data_t batches (timestamp + heart)
+UUID_ECG_RAW_DATA = "12345678-1234-5678-1234-56789abcdef3"  # ecg_raw_data_t batches (timestamp + CH0 ECG)
 
 # Standard Heart Rate Measurement characteristic UUID (0x2A37)
 UUID_HR_MEASUREMENT = "00002a37-0000-1000-8000-00805f9b34fb"
@@ -262,7 +262,7 @@ def iter_structs(fmt: str, payload: bytes):
 class App(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ECG Belt GUI (BLE)")
+        self.setWindowTitle("ECG Belt GUI (BLE, ADS131M04)")
         self.resize(900, 700)
 
         self.state = UiState()
@@ -272,7 +272,10 @@ class App(QtWidgets.QWidget):
         self._reader: "BleStreamThread | None" = None
 
         self._ecg_buf: list[float] = []
-        self._ecg_aux_buf: list[float] = []
+        self._adc_ch0_buf: list[float] = []
+        self._adc_ch1_buf: list[float] = []
+        self._adc_ch2_buf: list[float] = []
+        self._adc_ch3_buf: list[float] = []
         self._imu_ax_g: list[float] = []
         self._imu_ay_g: list[float] = []
         self._imu_az_g: list[float] = []
@@ -280,7 +283,7 @@ class App(QtWidgets.QWidget):
 
         # Display conditioning (raw stream is ADC counts).
         self._ecg_lp: float = 0.0
-        self._ecg_aux_lp: float = 0.0
+        self._adc_lp: list[float] = [0.0, 0.0, 0.0, 0.0]
         self._ecg_detrend_alpha: float = 0.01
 
         self._status = QtWidgets.QLabel("Disconnected")
@@ -289,6 +292,12 @@ class App(QtWidgets.QWidget):
         self._rr = QtWidgets.QLabel("-")
         self._ecg = QtWidgets.QLabel("-")
         self._imu = QtWidgets.QLabel("-")
+        self._adc_note = QtWidgets.QLabel(
+            "All 4 ADS131M04 channels are enabled in firmware. "
+            "The raw ECG and HR pipeline use CH0 on this PCB. "
+            "CH1-CH3 are currently floating."
+        )
+        self._adc_note.setWordWrap(True)
 
         header = QtWidgets.QGridLayout()
         header.setColumnStretch(1, 1)
@@ -303,22 +312,24 @@ class App(QtWidgets.QWidget):
         self._device_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents)
         header.addWidget(self._device_combo, 2, 1)
 
-        header.addWidget(QtWidgets.QLabel("Heart rate (BPM):"), 3, 0)
-        header.addWidget(self._bpm, 3, 1)
-        header.addWidget(QtWidgets.QLabel("RR interval (ms):"), 4, 0)
-        header.addWidget(self._rr, 4, 1)
+        header.addWidget(QtWidgets.QLabel("ADC stream note:"), 3, 0)
+        header.addWidget(self._adc_note, 3, 1)
+        header.addWidget(QtWidgets.QLabel("Heart rate (BPM):"), 4, 0)
+        header.addWidget(self._bpm, 4, 1)
+        header.addWidget(QtWidgets.QLabel("RR interval (ms):"), 5, 0)
+        header.addWidget(self._rr, 5, 1)
 
         buttons = QtWidgets.QHBoxLayout()
         self._btn_scan = QtWidgets.QPushButton("Scan")
         self._btn_stream = QtWidgets.QPushButton("Start streaming")
         self._btn_stop = QtWidgets.QPushButton("Stop")
-        self._chk_ecg = QtWidgets.QCheckBox("Show ECG")
+        self._chk_ecg = QtWidgets.QCheckBox("Show ECG (raw CH0)")
         self._chk_ecg.setChecked(True)
-        self._chk_ecg_aux = QtWidgets.QCheckBox("Show ECG aux")
-        self._chk_ecg_aux.setChecked(True)
-        self._chk_ecg_detrend = QtWidgets.QCheckBox("Remove DC (ECG)")
+        self._chk_adc = QtWidgets.QCheckBox("Show ADS131M04 CH0-CH3")
+        self._chk_adc.setChecked(True)
+        self._chk_ecg_detrend = QtWidgets.QCheckBox("Remove DC (ADC)")
         self._chk_ecg_detrend.setChecked(True)
-        self._chk_ecg_invert = QtWidgets.QCheckBox("Invert (ECG)")
+        self._chk_ecg_invert = QtWidgets.QCheckBox("Invert ECG stream")
         self._chk_ecg_invert.setChecked(False)
         self._chk_imu = QtWidgets.QCheckBox("Show IMU")
         self._chk_imu.setChecked(True)
@@ -327,7 +338,7 @@ class App(QtWidgets.QWidget):
         self._btn_stream.clicked.connect(self._on_start_streaming)
         self._btn_stop.clicked.connect(self._on_stop_streaming)
         self._chk_ecg.stateChanged.connect(self._update_plot_visibility)
-        self._chk_ecg_aux.stateChanged.connect(self._update_plot_visibility)
+        self._chk_adc.stateChanged.connect(self._update_plot_visibility)
         self._chk_imu.stateChanged.connect(self._update_plot_visibility)
 
         buttons.addWidget(self._btn_scan)
@@ -335,7 +346,7 @@ class App(QtWidgets.QWidget):
         buttons.addWidget(self._btn_stop)
         buttons.addSpacing(16)
         buttons.addWidget(self._chk_ecg)
-        buttons.addWidget(self._chk_ecg_aux)
+        buttons.addWidget(self._chk_adc)
         buttons.addWidget(self._chk_ecg_detrend)
         buttons.addWidget(self._chk_ecg_invert)
         buttons.addWidget(self._chk_imu)
@@ -343,13 +354,29 @@ class App(QtWidgets.QWidget):
         self._btn_stop.setEnabled(False)
 
         plots = QtWidgets.QVBoxLayout()
-        self._ecg_plot = pg.PlotWidget(title="ECG raw")
+        self._ecg_plot = pg.PlotWidget(title="ECG raw (CH0 BLE stream)")
         self._ecg_plot.showGrid(x=True, y=True, alpha=0.3)
         self._ecg_curve = self._ecg_plot.plot(pen=pg.mkPen("#00e5ff", width=1))
 
-        self._ecg_aux_plot = pg.PlotWidget(title="ECG aux (ADC ch0)")
-        self._ecg_aux_plot.showGrid(x=True, y=True, alpha=0.3)
-        self._ecg_aux_curve = self._ecg_aux_plot.plot(pen=pg.mkPen("#ffb300", width=1))
+        self._adc_plot = pg.PlotWidget(title="ADS131M04 channels (CH0 = ECG, CH1-CH3 floating)")
+        self._adc_plot.showGrid(x=True, y=True, alpha=0.3)
+        self._adc_plot.addLegend()
+        self._adc_curve_ch0 = self._adc_plot.plot(
+            pen=pg.mkPen("#00e5ff", width=1),
+            name="CH0 (ECG)"
+        )
+        self._adc_curve_ch1 = self._adc_plot.plot(
+            pen=pg.mkPen("#ffb300", width=1),
+            name="CH1 (floating)"
+        )
+        self._adc_curve_ch2 = self._adc_plot.plot(
+            pen=pg.mkPen("#4caf50", width=1),
+            name="CH2 (floating)"
+        )
+        self._adc_curve_ch3 = self._adc_plot.plot(
+            pen=pg.mkPen("#ff5252", width=1),
+            name="CH3 (floating)"
+        )
 
         self._imu_plot = pg.PlotWidget(title="IMU accel (g)")
         self._imu_plot.showGrid(x=True, y=True, alpha=0.3)
@@ -358,7 +385,7 @@ class App(QtWidgets.QWidget):
         self._imu_curve_z = self._imu_plot.plot(pen=pg.mkPen("#448aff", width=1), name="az")
 
         plots.addWidget(self._ecg_plot, 2)
-        plots.addWidget(self._ecg_aux_plot, 2)
+        plots.addWidget(self._adc_plot, 2)
         plots.addWidget(self._imu_plot, 2)
 
         self._plot_timer = QtCore.QTimer(self)
@@ -402,10 +429,12 @@ class App(QtWidgets.QWidget):
             y = self._ecg_buf
             x = list(range(len(y)))
             self._ecg_curve.setData(x, y)
-        if self._ecg_aux_buf:
-            y2 = self._ecg_aux_buf
-            x2 = list(range(len(y2)))
-            self._ecg_aux_curve.setData(x2, y2)
+        if self._adc_ch0_buf:
+            x_adc = list(range(len(self._adc_ch0_buf)))
+            self._adc_curve_ch0.setData(x_adc, self._adc_ch0_buf)
+            self._adc_curve_ch1.setData(x_adc, self._adc_ch1_buf)
+            self._adc_curve_ch2.setData(x_adc, self._adc_ch2_buf)
+            self._adc_curve_ch3.setData(x_adc, self._adc_ch3_buf)
         if self._imu_ax_g:
             n = len(self._imu_ax_g)
             x = list(range(n))
@@ -415,7 +444,7 @@ class App(QtWidgets.QWidget):
 
     def _update_plot_visibility(self):
         self._ecg_plot.setVisible(self._chk_ecg.isChecked())
-        self._ecg_aux_plot.setVisible(self._chk_ecg_aux.isChecked())
+        self._adc_plot.setVisible(self._chk_adc.isChecked())
         self._imu_plot.setVisible(self._chk_imu.isChecked())
 
     def _on_scan(self):
@@ -497,10 +526,15 @@ class App(QtWidgets.QWidget):
 
         # Reset plots on new stream
         self._ecg_buf.clear()
-        self._ecg_aux_buf.clear()
+        self._adc_ch0_buf.clear()
+        self._adc_ch1_buf.clear()
+        self._adc_ch2_buf.clear()
+        self._adc_ch3_buf.clear()
         self._imu_ax_g.clear()
         self._imu_ay_g.clear()
         self._imu_az_g.clear()
+        self._ecg_lp = 0.0
+        self._adc_lp = [0.0, 0.0, 0.0, 0.0]
 
         address, name = selected
         self._reader = BleStreamThread(address=address, name=name, parent=self)
@@ -510,7 +544,7 @@ class App(QtWidgets.QWidget):
         self._reader.nusLogReady.connect(self._on_stream_nus_log)
         self._reader.hrmReady.connect(self._on_stream_hrm)
         self._reader.ecgRawReady.connect(self._on_stream_ecg_raw)
-        self._reader.ecgAuxReady.connect(self._on_stream_ecg_aux)
+        self._reader.adcFrameReady.connect(self._on_stream_adc_frame)
         self._reader.imuReady.connect(self._on_stream_imu)
         self._reader.start()
 
@@ -582,14 +616,18 @@ class App(QtWidgets.QWidget):
             self._set_ui(ecg=str(last))
 
     @QtCore.Slot(object)
-    def _on_stream_ecg_aux(self, payload: bytes):
-        # ecg_data_t is packed: uint32 sample_count + int32 ecg_aux
-        for (_ts, ecg_aux) in iter_structs("<Ii", payload):
-            x = float(int(ecg_aux))
+    def _on_stream_adc_frame(self, payload: bytes):
+        # adc_data_t is packed: uint32 sample_count + int32 ch0 + ch1 + ch2 + ch3
+        for (_ts, ch0, ch1, ch2, ch3) in iter_structs("<Iiiii", payload):
+            values = [float(ch0), float(ch1), float(ch2), float(ch3)]
             if self._chk_ecg_detrend.isChecked():
-                self._ecg_aux_lp += self._ecg_detrend_alpha * (x - self._ecg_aux_lp)
-                x = x - self._ecg_aux_lp
-            self._append_plot_sample(self._ecg_aux_buf, x)
+                for idx, sample in enumerate(values):
+                    self._adc_lp[idx] += self._ecg_detrend_alpha * (sample - self._adc_lp[idx])
+                    values[idx] = sample - self._adc_lp[idx]
+            self._append_plot_sample(self._adc_ch0_buf, values[0])
+            self._append_plot_sample(self._adc_ch1_buf, values[1])
+            self._append_plot_sample(self._adc_ch2_buf, values[2])
+            self._append_plot_sample(self._adc_ch3_buf, values[3])
 
     @QtCore.Slot(object)
     def _on_stream_imu(self, payload: bytes):
@@ -614,4 +652,3 @@ def main():
     w = App()
     w.show()
     qapp.exec()
-
