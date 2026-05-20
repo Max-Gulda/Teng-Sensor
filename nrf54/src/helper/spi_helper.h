@@ -3,7 +3,7 @@
  * @brief Shared SPI transceive helper for Zephyr sensor drivers.
  *
  * CS is managed by Zephyr via spi_config.cs (configured in devicetree).
- * Both ADS131M04 and LSM6DSO drivers use this helper.
+ * The ADS131M04 driver uses this helper.
  */
 
 #ifndef SPI_HELPER_H

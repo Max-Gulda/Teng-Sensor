@@ -1,4 +1,6 @@
 import asyncio
+import math
+import queue
 import struct
 from dataclasses import dataclass
 
@@ -96,10 +98,7 @@ class ScanThread(QtCore.QThread):
 class BleStreamThread(QtCore.QThread):
     statusMessage = QtCore.Signal(str)
     connectionChanged = QtCore.Signal(bool)
-    hrmReady = QtCore.Signal(object)      # bytes
-    ecgRawReady = QtCore.Signal(object)   # bytes
     adcFrameReady = QtCore.Signal(object) # bytes
-    imuReady = QtCore.Signal(object)      # bytes
     deviceNameReady = QtCore.Signal(str)
     nusLogReady = QtCore.Signal(str)
 
@@ -108,9 +107,13 @@ class BleStreamThread(QtCore.QThread):
         self._address = str(address)
         self._name = (name or "").strip() or None
         self._running = True
+        self._commands: queue.Queue[str] = queue.Queue()
 
     def stop(self):
         self._running = False
+
+    def send_command(self, command: str):
+        self._commands.put(str(command))
 
     def run(self):
         try:
@@ -137,21 +140,9 @@ class BleStreamThread(QtCore.QThread):
 
             self.statusMessage.emit("Connected. Subscribing...")
 
-            def on_hrm(_s, data: bytearray):
-                if self._running:
-                    self.hrmReady.emit(bytes(data))
-
-            def on_ecg(_s, data: bytearray):
-                if self._running:
-                    self.ecgRawReady.emit(bytes(data))
-
             def on_adc_frame(_s, data: bytearray):
                 if self._running:
                     self.adcFrameReady.emit(bytes(data))
-
-            def on_imu(_s, data: bytearray):
-                if self._running:
-                    self.imuReady.emit(bytes(data))
 
             def on_nus(_s, data: bytearray):
                 if not self._running:
@@ -161,96 +152,110 @@ class BleStreamThread(QtCore.QThread):
                 except Exception:
                     pass
 
-            await client.start_notify(UUID_HR_MEASUREMENT, on_hrm)
-            await client.start_notify(UUID_ECG_RAW_DATA, on_ecg)
-            await client.start_notify(UUID_ECG_DATA, on_adc_frame)
-            await client.start_notify(UUID_IMU_DATA, on_imu)
+            await client.start_notify(UUID_ADC_DATA, on_adc_frame)
             try:
                 await client.start_notify(UUID_NUS_TX, on_nus)
                 self.statusMessage.emit("NUS log stream enabled.")
             except Exception:
                 pass
-            self.statusMessage.emit("Streaming started. GUI shows raw ECG from CH0 plus ADS131M04 CH0-CH3.")
+            self.statusMessage.emit("Streaming started. GUI shows calibrated ADS131M04 CH0-CH3 voltages.")
 
             while self._running and client.is_connected:
+                await self._drain_commands(client)
                 await asyncio.sleep(0.1)
 
             self.statusMessage.emit("Stopping notifications...")
-            for uuid in (UUID_HR_MEASUREMENT, UUID_ECG_RAW_DATA, UUID_ECG_DATA, UUID_IMU_DATA, UUID_NUS_TX):
+            for uuid in (UUID_ADC_DATA, UUID_NUS_TX):
                 try:
                     await client.stop_notify(uuid)
                 except Exception:
                     pass
 
+    async def _drain_commands(self, client: BleakClient):
+        while True:
+            try:
+                command = self._commands.get_nowait()
+            except queue.Empty:
+                return
+
+            payload = (command.rstrip() + "\n").encode("utf-8")
+            try:
+                await client.write_gatt_char(UUID_NUS_RX, payload, response=False)
+                self.statusMessage.emit(f"Sent command: {command}")
+            except Exception as exc:
+                self.statusMessage.emit(f"Failed to send command '{command}': {exc}")
 
 # Custom service UUIDs (see nrf54/src/bluetooth/bluetooth.c)
-UUID_ECG_SERVICE = "12345678-1234-5678-1234-56789abcdef0"
-UUID_ECG_DATA = "12345678-1234-5678-1234-56789abcdef1"      # adc_data_t batches (timestamp + ch0-ch3)
-UUID_IMU_DATA = "12345678-1234-5678-1234-56789abcdef2"      # imu_data_t batches
-UUID_ECG_RAW_DATA = "12345678-1234-5678-1234-56789abcdef3"  # ecg_raw_data_t batches (timestamp + CH0 ECG)
-
-# Standard Heart Rate Measurement characteristic UUID (0x2A37)
-UUID_HR_MEASUREMENT = "00002a37-0000-1000-8000-00805f9b34fb"
-
+UUID_ADC_SERVICE = "12345678-1234-5678-1234-56789abcdef0"
+UUID_ADC_DATA = "12345678-1234-5678-1234-56789abcdef1"      # adc_data_t batches (timestamp + ch0-ch3)
 # Nordic UART Service (NUS) TX characteristic UUID (logs from firmware)
 UUID_NUS_TX = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+# Nordic UART Service (NUS) RX characteristic UUID (commands to firmware)
+UUID_NUS_RX = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 
 # Standard GAP Device Name characteristic UUID (0x2A00)
 UUID_GAP_DEVICE_NAME = "00002a00-0000-1000-8000-00805f9b34fb"
 
-# LSM6DSO accel sensitivity used by the firmware configuration:
-# accel full-scale = +/-4g  -> 0.122 mg/LSB
-ACCEL_G_PER_LSB = 0.000122
+# ADS131M04 conversion. Firmware config uses gain=1 on all channels.
+ADS131M04_VREF_V = 1.2
+ADS131M04_FULL_SCALE_COUNTS = 1 << 23
+ADS131M04_CHANNEL_GAINS = (1.0, 1.0, 1.0, 1.0)
+
+# CH0/CH1 have 100k high-side and 15k low-side dividers before the ADC.
+DIVIDER_HIGH_OHM = 100_000.0
+DIVIDER_LOW_OHM = 15_000.0
+DIVIDER_SOURCE_MULTIPLIER = (DIVIDER_HIGH_OHM + DIVIDER_LOW_OHM) / DIVIDER_LOW_OHM
+ADC_INPUT_MULTIPLIERS = (
+    DIVIDER_SOURCE_MULTIPLIER,
+    DIVIDER_SOURCE_MULTIPLIER,
+    1.0,
+    1.0,
+)
+
+# Per-channel trim hooks for measured calibration. Keep offset in source volts.
+CHANNEL_TRIM_GAIN = (1.0, 1.0, 1.0, 1.0)
+CHANNEL_TRIM_OFFSET_V = (0.0, 0.0, 0.0, 0.0)
+
+ADS131M04_SAMPLE_RATES = (
+    ("32 kSPS", 32000),
+    ("16 kSPS", 16000),
+    ("8 kSPS", 8000),
+    ("4 kSPS", 4000),
+    ("2 kSPS", 2000),
+    ("1 kSPS", 1000),
+    ("500 SPS", 500),
+    ("250 SPS", 250),
+)
+ADS131M04_DEFAULT_SAMPLE_RATE_HZ = 500
+DEFAULT_WINDOW_SECONDS = 10.0
+LOWPASS_MIN_CUTOFF_HZ = 1
+LOWPASS_MAX_CUTOFF_HZ = 240
+LOWPASS_DEFAULT_CUTOFF_HZ = 50
+NOTCH_FREQUENCY_HZ = 50
+NOTCH_Q = 30.0
+ADC_CHANNEL_LABELS = (
+    "CH0 source V (divider)",
+    "CH1 source V (divider)",
+    "CH2 ADC V",
+    "CH3 ADC V",
+)
+ADC_CHANNEL_COLORS = ("#00e5ff", "#ffb300", "#4caf50", "#ff5252")
+SETTINGS_ORG = "TENG Sensor"
+SETTINGS_APP = "Data Collector"
+SETTINGS_CHANNEL_VISIBLE = "scope/channel_visible"
+SETTINGS_WINDOW_SECONDS = "scope/window_seconds"
+SETTINGS_AC_COUPLING = "scope/ac_coupling"
+SETTINGS_LOWPASS_ENABLED = "scope/lowpass_enabled"
+SETTINGS_LOWPASS_CUTOFF_HZ = "scope/lowpass_cutoff_hz"
+SETTINGS_NOTCH_ENABLED = "scope/notch_50hz_enabled"
+SETTINGS_ADS131_SAMPLE_RATE_HZ = "scope/ads131_sample_rate_hz"
 
 
 @dataclass
 class UiState:
     connected: bool = False
     device: str = ""
-    bpm: int | None = None
-    rr_ms: int | None = None
-    ecg_last: int | None = None
-    imu_last: tuple[int, int, int, int, int, int] | None = None
-
-
-def parse_hrm(payload: bytes) -> tuple[int | None, int | None]:
-    """
-    Parse BLE Heart Rate Measurement (0x2A37).
-    Returns (bpm, rr_ms) where rr_ms is the *last* RR interval in the packet if present.
-    """
-    if not payload:
-        return None, None
-
-    flags = payload[0]
-    hr_16bit = bool(flags & 0x01)
-    rr_present = bool(flags & 0x10)
-
-    idx = 1
-    if hr_16bit:
-        if len(payload) < idx + 2:
-            return None, None
-        bpm = int.from_bytes(payload[idx : idx + 2], "little")
-        idx += 2
-    else:
-        if len(payload) < idx + 1:
-            return None, None
-        bpm = payload[idx]
-        idx += 1
-
-    # Skip "Energy Expended" field if present (flags bit 3)
-    if flags & 0x08:
-        idx += 2
-
-    rr_ms = None
-    if rr_present:
-        # RR-interval values are uint16 in units of 1/1024 s (per spec).
-        # There may be multiple RR values; use the last complete one.
-        while idx + 2 <= len(payload):
-            rr_1024 = int.from_bytes(payload[idx : idx + 2], "little")
-            idx += 2
-            rr_ms = int(rr_1024 * 1000 / 1024)
-
-    return bpm, rr_ms
+    adc_last: tuple[float, float, float, float] | None = None
 
 
 def iter_structs(fmt: str, payload: bytes):
@@ -259,10 +264,99 @@ def iter_structs(fmt: str, payload: bytes):
         yield struct.unpack_from(fmt, payload, off)
 
 
+def adc_counts_to_volts(channel: int, counts: int) -> float:
+    adc_pin_v = (
+        float(counts)
+        * (ADS131M04_VREF_V / ADS131M04_CHANNEL_GAINS[channel])
+        / ADS131M04_FULL_SCALE_COUNTS
+    )
+    source_v = adc_pin_v * ADC_INPUT_MULTIPLIERS[channel]
+    return source_v * CHANNEL_TRIM_GAIN[channel] + CHANNEL_TRIM_OFFSET_V[channel]
+
+
+class ButterworthLowpass:
+    def __init__(self, sample_rate_hz: float, cutoff_hz: float):
+        cutoff_hz = min(max(float(cutoff_hz), LOWPASS_MIN_CUTOFF_HZ), LOWPASS_MAX_CUTOFF_HZ)
+        k = math.tan(math.pi * cutoff_hz / float(sample_rate_hz))
+        norm = 1.0 / (1.0 + math.sqrt(2.0) * k + k * k)
+        self._b0 = k * k * norm
+        self._b1 = 2.0 * self._b0
+        self._b2 = self._b0
+        self._a1 = 2.0 * (k * k - 1.0) * norm
+        self._a2 = (1.0 - math.sqrt(2.0) * k + k * k) * norm
+        self._x1 = 0.0
+        self._x2 = 0.0
+        self._y1 = 0.0
+        self._y2 = 0.0
+        self._initialized = False
+
+    def filter(self, sample: float) -> float:
+        sample = float(sample)
+        if not self._initialized:
+            self._x1 = sample
+            self._x2 = sample
+            self._y1 = sample
+            self._y2 = sample
+            self._initialized = True
+
+        out = (
+            self._b0 * sample
+            + self._b1 * self._x1
+            + self._b2 * self._x2
+            - self._a1 * self._y1
+            - self._a2 * self._y2
+        )
+        self._x2 = self._x1
+        self._x1 = sample
+        self._y2 = self._y1
+        self._y1 = out
+        return out
+
+
+class NotchFilter:
+    def __init__(self, sample_rate_hz: float, notch_hz: float, q: float):
+        w0 = 2.0 * math.pi * float(notch_hz) / float(sample_rate_hz)
+        cos_w0 = math.cos(w0)
+        alpha = math.sin(w0) / (2.0 * float(q))
+        a0 = 1.0 + alpha
+        self._b0 = 1.0 / a0
+        self._b1 = -2.0 * cos_w0 / a0
+        self._b2 = 1.0 / a0
+        self._a1 = -2.0 * cos_w0 / a0
+        self._a2 = (1.0 - alpha) / a0
+        self._x1 = 0.0
+        self._x2 = 0.0
+        self._y1 = 0.0
+        self._y2 = 0.0
+        self._initialized = False
+
+    def filter(self, sample: float) -> float:
+        sample = float(sample)
+        if not self._initialized:
+            self._x1 = sample
+            self._x2 = sample
+            self._y1 = sample
+            self._y2 = sample
+            self._initialized = True
+
+        out = (
+            self._b0 * sample
+            + self._b1 * self._x1
+            + self._b2 * self._x2
+            - self._a1 * self._y1
+            - self._a2 * self._y2
+        )
+        self._x2 = self._x1
+        self._x1 = sample
+        self._y2 = self._y1
+        self._y1 = out
+        return out
+
+
 class App(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ECG Belt GUI (BLE, ADS131M04)")
+        self.setWindowTitle("TENG Sensor Scope (BLE, ADS131M04)")
         self.resize(900, 700)
 
         self.state = UiState()
@@ -270,32 +364,39 @@ class App(QtWidgets.QWidget):
         self._scan_results: list[tuple[str, str | None]] = []  # (address, name)
         self._scan_thread: "ScanThread | None" = None
         self._reader: "BleStreamThread | None" = None
+        self._settings = QtCore.QSettings(SETTINGS_ORG, SETTINGS_APP)
 
-        self._ecg_buf: list[float] = []
         self._adc_ch0_buf: list[float] = []
         self._adc_ch1_buf: list[float] = []
         self._adc_ch2_buf: list[float] = []
         self._adc_ch3_buf: list[float] = []
-        self._imu_ax_g: list[float] = []
-        self._imu_ay_g: list[float] = []
-        self._imu_az_g: list[float] = []
-        self._max_plot_samples = 2000
+        self._adc_buffers = [
+            self._adc_ch0_buf,
+            self._adc_ch1_buf,
+            self._adc_ch2_buf,
+            self._adc_ch3_buf,
+        ]
+        self._adc_sample_idx_buf: list[int] = []
+        self._channel_visible = self._load_channel_visible()
+        self._sample_rate_hz = self._load_ads131_sample_rate_hz()
+        self._window_seconds = self._load_window_seconds()
+        self._max_plot_samples = self._window_sample_count()
 
-        # Display conditioning (raw stream is ADC counts).
-        self._ecg_lp: float = 0.0
+        # Optional display conditioning only; ADC data remains raw on BLE.
         self._adc_lp: list[float] = [0.0, 0.0, 0.0, 0.0]
-        self._ecg_detrend_alpha: float = 0.01
+        self._ac_coupling_alpha: float = 0.01
+        self._lowpass_enabled = self._load_bool(SETTINGS_LOWPASS_ENABLED, True)
+        self._lowpass_cutoff_hz = self._load_lowpass_cutoff_hz()
+        self._lowpass_filters = self._create_lowpass_filters()
+        self._notch_enabled = self._load_bool(SETTINGS_NOTCH_ENABLED, True)
+        self._notch_filters = self._create_notch_filters()
 
         self._status = QtWidgets.QLabel("Disconnected")
         self._device = QtWidgets.QLabel("-")
-        self._bpm = QtWidgets.QLabel("-")
-        self._rr = QtWidgets.QLabel("-")
-        self._ecg = QtWidgets.QLabel("-")
-        self._imu = QtWidgets.QLabel("-")
+        self._adc_last = QtWidgets.QLabel("-")
         self._adc_note = QtWidgets.QLabel(
-            "All 4 ADS131M04 channels are enabled in firmware. "
-            "The raw ECG and HR pipeline use CH0 on this PCB. "
-            "CH1-CH3 are currently floating."
+            "CH0 and CH1 are shown as source voltage through the 100k/15k dividers. "
+            "CH2 and CH3 are shown as direct ADC input voltage."
         )
         self._adc_note.setWordWrap(True)
 
@@ -314,79 +415,47 @@ class App(QtWidgets.QWidget):
 
         header.addWidget(QtWidgets.QLabel("ADC stream note:"), 3, 0)
         header.addWidget(self._adc_note, 3, 1)
-        header.addWidget(QtWidgets.QLabel("Heart rate (BPM):"), 4, 0)
-        header.addWidget(self._bpm, 4, 1)
-        header.addWidget(QtWidgets.QLabel("RR interval (ms):"), 5, 0)
-        header.addWidget(self._rr, 5, 1)
+        header.addWidget(QtWidgets.QLabel("Last ADC voltages:"), 4, 0)
+        header.addWidget(self._adc_last, 4, 1)
 
         buttons = QtWidgets.QHBoxLayout()
         self._btn_scan = QtWidgets.QPushButton("Scan")
         self._btn_stream = QtWidgets.QPushButton("Start streaming")
         self._btn_stop = QtWidgets.QPushButton("Stop")
-        self._chk_ecg = QtWidgets.QCheckBox("Show ECG (raw CH0)")
-        self._chk_ecg.setChecked(True)
-        self._chk_adc = QtWidgets.QCheckBox("Show ADS131M04 CH0-CH3")
-        self._chk_adc.setChecked(True)
-        self._chk_ecg_detrend = QtWidgets.QCheckBox("Remove DC (ADC)")
-        self._chk_ecg_detrend.setChecked(True)
-        self._chk_ecg_invert = QtWidgets.QCheckBox("Invert ECG stream")
-        self._chk_ecg_invert.setChecked(False)
-        self._chk_imu = QtWidgets.QCheckBox("Show IMU")
-        self._chk_imu.setChecked(True)
+        self._btn_settings = QtWidgets.QPushButton("Settings")
+        self._chk_ac_coupling = QtWidgets.QCheckBox("AC couple display")
+        self._chk_ac_coupling.setChecked(self._load_bool(SETTINGS_AC_COUPLING, False))
 
         self._btn_scan.clicked.connect(self._on_scan)
         self._btn_stream.clicked.connect(self._on_start_streaming)
         self._btn_stop.clicked.connect(self._on_stop_streaming)
-        self._chk_ecg.stateChanged.connect(self._update_plot_visibility)
-        self._chk_adc.stateChanged.connect(self._update_plot_visibility)
-        self._chk_imu.stateChanged.connect(self._update_plot_visibility)
+        self._btn_settings.clicked.connect(self._open_settings)
+        self._chk_ac_coupling.stateChanged.connect(lambda _state: self._save_settings())
 
         buttons.addWidget(self._btn_scan)
         buttons.addWidget(self._btn_stream)
         buttons.addWidget(self._btn_stop)
+        buttons.addWidget(self._btn_settings)
         buttons.addSpacing(16)
-        buttons.addWidget(self._chk_ecg)
-        buttons.addWidget(self._chk_adc)
-        buttons.addWidget(self._chk_ecg_detrend)
-        buttons.addWidget(self._chk_ecg_invert)
-        buttons.addWidget(self._chk_imu)
+        buttons.addWidget(self._chk_ac_coupling)
         buttons.addStretch(1)
         self._btn_stop.setEnabled(False)
 
         plots = QtWidgets.QVBoxLayout()
-        self._ecg_plot = pg.PlotWidget(title="ECG raw (CH0 BLE stream)")
-        self._ecg_plot.showGrid(x=True, y=True, alpha=0.3)
-        self._ecg_curve = self._ecg_plot.plot(pen=pg.mkPen("#00e5ff", width=1))
-
-        self._adc_plot = pg.PlotWidget(title="ADS131M04 channels (CH0 = ECG, CH1-CH3 floating)")
-        self._adc_plot.showGrid(x=True, y=True, alpha=0.3)
-        self._adc_plot.addLegend()
-        self._adc_curve_ch0 = self._adc_plot.plot(
-            pen=pg.mkPen("#00e5ff", width=1),
-            name="CH0 (ECG)"
-        )
-        self._adc_curve_ch1 = self._adc_plot.plot(
-            pen=pg.mkPen("#ffb300", width=1),
-            name="CH1 (floating)"
-        )
-        self._adc_curve_ch2 = self._adc_plot.plot(
-            pen=pg.mkPen("#4caf50", width=1),
-            name="CH2 (floating)"
-        )
-        self._adc_curve_ch3 = self._adc_plot.plot(
-            pen=pg.mkPen("#ff5252", width=1),
-            name="CH3 (floating)"
-        )
-
-        self._imu_plot = pg.PlotWidget(title="IMU accel (g)")
-        self._imu_plot.showGrid(x=True, y=True, alpha=0.3)
-        self._imu_curve_x = self._imu_plot.plot(pen=pg.mkPen("#ff5252", width=1), name="ax")
-        self._imu_curve_y = self._imu_plot.plot(pen=pg.mkPen("#4caf50", width=1), name="ay")
-        self._imu_curve_z = self._imu_plot.plot(pen=pg.mkPen("#448aff", width=1), name="az")
-
-        plots.addWidget(self._ecg_plot, 2)
-        plots.addWidget(self._adc_plot, 2)
-        plots.addWidget(self._imu_plot, 2)
+        self._adc_plots: list[pg.PlotWidget] = []
+        self._adc_curves = []
+        for label, color in zip(ADC_CHANNEL_LABELS, ADC_CHANNEL_COLORS):
+            plot = pg.PlotWidget(title=label)
+            plot.showGrid(x=True, y=True, alpha=0.3)
+            plot.setLabel("left", "Voltage", units="V")
+            plot.setLabel("bottom", "Time", units="s")
+            if self._adc_plots:
+                plot.setXLink(self._adc_plots[0])
+            curve = plot.plot(pen=pg.mkPen(color, width=1), name=label)
+            self._adc_plots.append(plot)
+            self._adc_curves.append(curve)
+            plots.addWidget(plot, 1)
+        self._update_plot_visibility()
 
         self._plot_timer = QtCore.QTimer(self)
         self._plot_timer.setInterval(50)  # ~20 FPS
@@ -398,54 +467,265 @@ class App(QtWidgets.QWidget):
         root.addLayout(buttons)
         root.addLayout(plots)
 
-        self.destroyed.connect(lambda *_: self._on_close())
-
     def _log_line(self, msg: str):
         # Print logs to the launching terminal (stdout) instead of the GUI widget.
         # Keep the widget around (layout simplicity), but don't write to it.
         print(str(msg), flush=True)
 
-    def _set_ui(self, *, status=None, device=None, bpm=None, rr=None, ecg=None, imu=None):
+    def closeEvent(self, event):
+        self._save_settings()
+        self._stop_streaming_thread()
+        super().closeEvent(event)
+
+    def _load_bool(self, key: str, default: bool) -> bool:
+        value = self._settings.value(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+
+    def _load_window_seconds(self) -> float:
+        value = self._settings.value(SETTINGS_WINDOW_SECONDS, DEFAULT_WINDOW_SECONDS)
+        try:
+            window_seconds = float(value)
+        except (TypeError, ValueError):
+            return DEFAULT_WINDOW_SECONDS
+        return min(120.0, max(0.1, window_seconds))
+
+    def _load_ads131_sample_rate_hz(self) -> int:
+        value = self._settings.value(SETTINGS_ADS131_SAMPLE_RATE_HZ, ADS131M04_DEFAULT_SAMPLE_RATE_HZ)
+        try:
+            sample_rate_hz = int(round(float(value)))
+        except (TypeError, ValueError):
+            return ADS131M04_DEFAULT_SAMPLE_RATE_HZ
+        valid_rates = {rate for _label, rate in ADS131M04_SAMPLE_RATES}
+        if sample_rate_hz not in valid_rates:
+            return ADS131M04_DEFAULT_SAMPLE_RATE_HZ
+        return sample_rate_hz
+
+    def _max_lowpass_cutoff_hz(self, sample_rate_hz: int | None = None) -> int:
+        rate_hz = self._sample_rate_hz if sample_rate_hz is None else int(sample_rate_hz)
+        return min(LOWPASS_MAX_CUTOFF_HZ, max(LOWPASS_MIN_CUTOFF_HZ, (rate_hz // 2) - 1))
+
+    def _load_lowpass_cutoff_hz(self) -> int:
+        value = self._settings.value(SETTINGS_LOWPASS_CUTOFF_HZ, LOWPASS_DEFAULT_CUTOFF_HZ)
+        try:
+            cutoff_hz = int(round(float(value)))
+        except (TypeError, ValueError):
+            return LOWPASS_DEFAULT_CUTOFF_HZ
+        return min(self._max_lowpass_cutoff_hz(), max(LOWPASS_MIN_CUTOFF_HZ, cutoff_hz))
+
+    def _load_channel_visible(self) -> list[bool]:
+        value = self._settings.value(SETTINGS_CHANNEL_VISIBLE, "")
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.split(",")]
+            if len(parts) == len(ADC_CHANNEL_LABELS):
+                return [part.lower() in ("1", "true", "yes", "on") for part in parts]
+        return [True, True, True, True]
+
+    def _save_settings(self):
+        visible = ",".join("1" if visible else "0" for visible in self._channel_visible)
+        self._settings.setValue(SETTINGS_CHANNEL_VISIBLE, visible)
+        self._settings.setValue(SETTINGS_WINDOW_SECONDS, self._window_seconds)
+        self._settings.setValue(SETTINGS_ADS131_SAMPLE_RATE_HZ, self._sample_rate_hz)
+        self._settings.setValue(SETTINGS_AC_COUPLING, self._chk_ac_coupling.isChecked())
+        self._settings.setValue(SETTINGS_LOWPASS_ENABLED, self._lowpass_enabled)
+        self._settings.setValue(SETTINGS_LOWPASS_CUTOFF_HZ, self._lowpass_cutoff_hz)
+        self._settings.setValue(SETTINGS_NOTCH_ENABLED, self._notch_enabled)
+        self._settings.sync()
+
+    def _create_lowpass_filters(self) -> list[ButterworthLowpass]:
+        return [
+            ButterworthLowpass(self._sample_rate_hz, self._lowpass_cutoff_hz)
+            for _ in ADC_CHANNEL_LABELS
+        ]
+
+    def _reset_lowpass_filters(self):
+        self._lowpass_filters = self._create_lowpass_filters()
+
+    def _create_notch_filters(self) -> list[NotchFilter]:
+        return [
+            NotchFilter(self._sample_rate_hz, NOTCH_FREQUENCY_HZ, NOTCH_Q)
+            for _ in ADC_CHANNEL_LABELS
+        ]
+
+    def _reset_notch_filters(self):
+        self._notch_filters = self._create_notch_filters()
+
+    def _apply_lowpass(self, values: list[float]) -> list[float]:
+        if not self._lowpass_enabled:
+            return values
+        return [
+            filt.filter(value)
+            for filt, value in zip(self._lowpass_filters, values)
+        ]
+
+    def _apply_notch(self, values: list[float]) -> list[float]:
+        if not self._notch_enabled:
+            return values
+        return [
+            filt.filter(value)
+            for filt, value in zip(self._notch_filters, values)
+        ]
+
+    def _clear_plot_buffers(self):
+        for buf in self._adc_buffers:
+            buf.clear()
+        self._adc_sample_idx_buf.clear()
+        self._adc_lp = [0.0, 0.0, 0.0, 0.0]
+
+    def _send_ads131_sample_rate(self):
+        if self._reader is None:
+            return
+        self._reader.send_command(f"ads131_rate {self._sample_rate_hz}")
+
+    def _set_ui(self, *, status=None, device=None, adc=None):
         if status is not None:
             self._status.setText(status)
         if device is not None:
             self._device.setText(device)
-        if bpm is not None:
-            self._bpm.setText(bpm)
-        if rr is not None:
-            self._rr.setText(rr)
-        if ecg is not None:
-            self._ecg.setText(ecg)
-        if imu is not None:
-            self._imu.setText(imu)
+        if adc is not None:
+            self._adc_last.setText(adc)
 
     def _append_plot_sample(self, buf: list[float], value: float):
         buf.append(float(value))
         if len(buf) > self._max_plot_samples:
             del buf[: len(buf) - self._max_plot_samples]
 
+    def _window_sample_count(self) -> int:
+        return max(1, int(round(self._window_seconds * self._sample_rate_hz)))
+
+    def _trim_plot_buffers(self):
+        for buf in (
+            self._adc_sample_idx_buf,
+            *self._adc_buffers,
+        ):
+            if len(buf) > self._max_plot_samples:
+                del buf[: len(buf) - self._max_plot_samples]
+
     def _refresh_plots(self):
-        if self._ecg_buf:
-            y = self._ecg_buf
-            x = list(range(len(y)))
-            self._ecg_curve.setData(x, y)
-        if self._adc_ch0_buf:
-            x_adc = list(range(len(self._adc_ch0_buf)))
-            self._adc_curve_ch0.setData(x_adc, self._adc_ch0_buf)
-            self._adc_curve_ch1.setData(x_adc, self._adc_ch1_buf)
-            self._adc_curve_ch2.setData(x_adc, self._adc_ch2_buf)
-            self._adc_curve_ch3.setData(x_adc, self._adc_ch3_buf)
-        if self._imu_ax_g:
-            n = len(self._imu_ax_g)
-            x = list(range(n))
-            self._imu_curve_x.setData(x, self._imu_ax_g)
-            self._imu_curve_y.setData(x, self._imu_ay_g)
-            self._imu_curve_z.setData(x, self._imu_az_g)
+        if self._adc_ch0_buf and self._adc_sample_idx_buf:
+            newest = self._adc_sample_idx_buf[-1]
+            x_adc = [
+                (idx - newest) / self._sample_rate_hz
+                for idx in self._adc_sample_idx_buf
+            ]
+            for curve, buf in zip(self._adc_curves, self._adc_buffers):
+                curve.setData(x_adc, buf)
 
     def _update_plot_visibility(self):
-        self._ecg_plot.setVisible(self._chk_ecg.isChecked())
-        self._adc_plot.setVisible(self._chk_adc.isChecked())
-        self._imu_plot.setVisible(self._chk_imu.isChecked())
+        if hasattr(self, "_adc_plots"):
+            for idx, plot in enumerate(self._adc_plots):
+                plot.setVisible(self._channel_visible[idx])
+
+    def _open_settings(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Scope settings")
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        channels_group = QtWidgets.QGroupBox("Visible channels")
+        channels_layout = QtWidgets.QGridLayout(channels_group)
+        channel_checks: list[QtWidgets.QCheckBox] = []
+        for idx, label in enumerate(ADC_CHANNEL_LABELS):
+            check = QtWidgets.QCheckBox(label)
+            check.setChecked(self._channel_visible[idx])
+            channel_checks.append(check)
+            channels_layout.addWidget(check, idx // 2, idx % 2)
+        layout.addWidget(channels_group)
+
+        timing_group = QtWidgets.QGroupBox("Acquisition")
+        timing_layout = QtWidgets.QFormLayout(timing_group)
+
+        sample_rate = QtWidgets.QComboBox()
+        for label, rate_hz in ADS131M04_SAMPLE_RATES:
+            sample_rate.addItem(label, rate_hz)
+        sample_rate_idx = sample_rate.findData(self._sample_rate_hz)
+        sample_rate.setCurrentIndex(max(0, sample_rate_idx))
+        timing_layout.addRow("ADS131M04 rate", sample_rate)
+
+        window_seconds = QtWidgets.QDoubleSpinBox()
+        window_seconds.setRange(0.1, 120.0)
+        window_seconds.setDecimals(1)
+        window_seconds.setSingleStep(0.5)
+        window_seconds.setSuffix(" s")
+        window_seconds.setValue(self._window_seconds)
+        timing_layout.addRow("Plot window", window_seconds)
+
+        layout.addWidget(timing_group)
+
+        filter_group = QtWidgets.QGroupBox("Display filter")
+        filter_layout = QtWidgets.QFormLayout(filter_group)
+
+        lowpass_enabled = QtWidgets.QCheckBox("Butterworth low-pass")
+        lowpass_enabled.setChecked(self._lowpass_enabled)
+        filter_layout.addRow(lowpass_enabled)
+
+        notch_enabled = QtWidgets.QCheckBox("50 Hz notch")
+        notch_enabled.setChecked(self._notch_enabled)
+        filter_layout.addRow(notch_enabled)
+
+        cutoff_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        cutoff_slider.setRange(LOWPASS_MIN_CUTOFF_HZ, self._max_lowpass_cutoff_hz())
+        cutoff_slider.setValue(self._lowpass_cutoff_hz)
+        cutoff_spin = QtWidgets.QSpinBox()
+        cutoff_spin.setRange(LOWPASS_MIN_CUTOFF_HZ, self._max_lowpass_cutoff_hz())
+        cutoff_spin.setSuffix(" Hz")
+        cutoff_spin.setValue(self._lowpass_cutoff_hz)
+        cutoff_slider.valueChanged.connect(cutoff_spin.setValue)
+        cutoff_spin.valueChanged.connect(cutoff_slider.setValue)
+
+        def update_cutoff_range():
+            selected_rate_hz = int(sample_rate.currentData())
+            max_cutoff_hz = self._max_lowpass_cutoff_hz(selected_rate_hz)
+            cutoff_slider.setMaximum(max_cutoff_hz)
+            cutoff_spin.setMaximum(max_cutoff_hz)
+            if cutoff_spin.value() > max_cutoff_hz:
+                cutoff_spin.setValue(max_cutoff_hz)
+
+        sample_rate.currentIndexChanged.connect(lambda _idx: update_cutoff_range())
+        update_cutoff_range()
+
+        cutoff_controls = QtWidgets.QHBoxLayout()
+        cutoff_controls.addWidget(cutoff_slider, 1)
+        cutoff_controls.addWidget(cutoff_spin)
+        filter_layout.addRow("Cutoff", cutoff_controls)
+
+        layout.addWidget(filter_group)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+
+        self._channel_visible = [check.isChecked() for check in channel_checks]
+        self._window_seconds = float(window_seconds.value())
+        new_sample_rate_hz = int(sample_rate.currentData())
+        sample_rate_changed = self._sample_rate_hz != new_sample_rate_hz
+        self._sample_rate_hz = new_sample_rate_hz
+        lowpass_enabled_changed = self._lowpass_enabled != lowpass_enabled.isChecked()
+        self._lowpass_enabled = lowpass_enabled.isChecked()
+        notch_enabled_changed = self._notch_enabled != notch_enabled.isChecked()
+        self._notch_enabled = notch_enabled.isChecked()
+        new_cutoff_hz = int(cutoff_spin.value())
+        if sample_rate_changed or lowpass_enabled_changed or new_cutoff_hz != self._lowpass_cutoff_hz:
+            self._lowpass_cutoff_hz = new_cutoff_hz
+            self._reset_lowpass_filters()
+        if sample_rate_changed or notch_enabled_changed:
+            self._reset_notch_filters()
+        self._max_plot_samples = self._window_sample_count()
+        self._trim_plot_buffers()
+        self._update_plot_visibility()
+        self._save_settings()
+        if sample_rate_changed:
+            self._clear_plot_buffers()
+            self._send_ads131_sample_rate()
 
     def _on_scan(self):
         self._set_ui(status="Scanning...")
@@ -492,10 +772,6 @@ class App(QtWidgets.QWidget):
         self._btn_stop.setEnabled(False)
         self._stop_streaming_thread()
 
-    def _on_close(self):
-        self._stop_streaming_thread()
-        self.destroy()
-
     def _get_selected_device(self) -> tuple[str, str] | None:
         idx = self._device_combo.currentIndex()
         if idx < 0 or idx >= len(self._scan_results):
@@ -525,16 +801,9 @@ class App(QtWidgets.QWidget):
             return
 
         # Reset plots on new stream
-        self._ecg_buf.clear()
-        self._adc_ch0_buf.clear()
-        self._adc_ch1_buf.clear()
-        self._adc_ch2_buf.clear()
-        self._adc_ch3_buf.clear()
-        self._imu_ax_g.clear()
-        self._imu_ay_g.clear()
-        self._imu_az_g.clear()
-        self._ecg_lp = 0.0
-        self._adc_lp = [0.0, 0.0, 0.0, 0.0]
+        self._clear_plot_buffers()
+        self._reset_lowpass_filters()
+        self._reset_notch_filters()
 
         address, name = selected
         self._reader = BleStreamThread(address=address, name=name, parent=self)
@@ -542,11 +811,9 @@ class App(QtWidgets.QWidget):
         self._reader.connectionChanged.connect(self._on_stream_connection_changed)
         self._reader.deviceNameReady.connect(self._on_stream_device_name)
         self._reader.nusLogReady.connect(self._on_stream_nus_log)
-        self._reader.hrmReady.connect(self._on_stream_hrm)
-        self._reader.ecgRawReady.connect(self._on_stream_ecg_raw)
         self._reader.adcFrameReady.connect(self._on_stream_adc_frame)
-        self._reader.imuReady.connect(self._on_stream_imu)
         self._reader.start()
+        self._send_ads131_sample_rate()
 
     def _stop_streaming_thread(self):
         reader = self._reader
@@ -592,57 +859,30 @@ class App(QtWidgets.QWidget):
                 self._log_line(line)
 
     @QtCore.Slot(object)
-    def _on_stream_hrm(self, payload: bytes):
-        bpm, rr = parse_hrm(payload)
-        if bpm is not None:
-            self._set_ui(bpm=str(bpm))
-        if rr is not None:
-            self._set_ui(rr=str(rr))
-
-    @QtCore.Slot(object)
-    def _on_stream_ecg_raw(self, payload: bytes):
-        last = None
-        for (_ts, heart) in iter_structs("<Ii", payload):
-            x = float(int(heart))
-            if self._chk_ecg_detrend.isChecked():
-                # One-pole LP + subtraction => simple high-pass (baseline wander removal).
-                self._ecg_lp += self._ecg_detrend_alpha * (x - self._ecg_lp)
-                x = x - self._ecg_lp
-            if self._chk_ecg_invert.isChecked():
-                x = -x
-            last = int(heart)
-            self._append_plot_sample(self._ecg_buf, x)
-        if last is not None:
-            self._set_ui(ecg=str(last))
-
-    @QtCore.Slot(object)
     def _on_stream_adc_frame(self, payload: bytes):
         # adc_data_t is packed: uint32 sample_count + int32 ch0 + ch1 + ch2 + ch3
-        for (_ts, ch0, ch1, ch2, ch3) in iter_structs("<Iiiii", payload):
-            values = [float(ch0), float(ch1), float(ch2), float(ch3)]
-            if self._chk_ecg_detrend.isChecked():
+        last_values = None
+        for (sample_idx, ch0, ch1, ch2, ch3) in iter_structs("<Iiiii", payload):
+            values = [
+                adc_counts_to_volts(0, ch0),
+                adc_counts_to_volts(1, ch1),
+                adc_counts_to_volts(2, ch2),
+                adc_counts_to_volts(3, ch3),
+            ]
+            last_values = values
+            values = self._apply_lowpass(values)
+            values = self._apply_notch(values)
+            if self._chk_ac_coupling.isChecked():
                 for idx, sample in enumerate(values):
-                    self._adc_lp[idx] += self._ecg_detrend_alpha * (sample - self._adc_lp[idx])
+                    self._adc_lp[idx] += self._ac_coupling_alpha * (sample - self._adc_lp[idx])
                     values[idx] = sample - self._adc_lp[idx]
-            self._append_plot_sample(self._adc_ch0_buf, values[0])
-            self._append_plot_sample(self._adc_ch1_buf, values[1])
-            self._append_plot_sample(self._adc_ch2_buf, values[2])
-            self._append_plot_sample(self._adc_ch3_buf, values[3])
-
-    @QtCore.Slot(object)
-    def _on_stream_imu(self, payload: bytes):
-        last = None
-        for (_ts, ax, ay, az, gx, gy, gz) in iter_structs("<Ihhhhhh", payload):
-            last = (int(ax), int(ay), int(az), int(gx), int(gy), int(gz))
-            self._append_plot_sample(self._imu_ax_g, float(ax) * ACCEL_G_PER_LSB)
-            self._append_plot_sample(self._imu_ay_g, float(ay) * ACCEL_G_PER_LSB)
-            self._append_plot_sample(self._imu_az_g, float(az) * ACCEL_G_PER_LSB)
-        if last is not None:
-            ax_g = last[0] * ACCEL_G_PER_LSB
-            ay_g = last[1] * ACCEL_G_PER_LSB
-            az_g = last[2] * ACCEL_G_PER_LSB
-            s = f"{ax_g:.3f} g, {ay_g:.3f} g, {az_g:.3f} g | gyro raw: {last[3]}, {last[4]}, {last[5]}"
-            self._set_ui(imu=s)
+            self._adc_sample_idx_buf.append(int(sample_idx))
+            if len(self._adc_sample_idx_buf) > self._max_plot_samples:
+                del self._adc_sample_idx_buf[: len(self._adc_sample_idx_buf) - self._max_plot_samples]
+            for buf, value in zip(self._adc_buffers, values):
+                self._append_plot_sample(buf, value)
+        if last_values is not None:
+            self._set_ui(adc="  ".join(f"CH{idx}: {value:.4f} V" for idx, value in enumerate(last_values)))
 
     # BLE notification handlers are managed inside BleStreamThread
 

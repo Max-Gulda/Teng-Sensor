@@ -188,7 +188,7 @@ int channel_queue_put(bt_channel_t *ch, const void *sample) {
 
 /**
  * @brief Send a GATT notification for a small scalar value.
- * Used for HRM which doesn't need batching or a DLQ.
+ * Used for simple characteristics that don't need batching or a DLQ.
  */
 int notify_simple(const struct bt_gatt_attr *attr, volatile bool *enabled,
     void *value, size_t size, const char *name) {

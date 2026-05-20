@@ -10,10 +10,8 @@
  */
 
 #include "bt_ecg.h"
-#include "bt_ecg_raw.h"
 #include "bt_channel.h"
 #include "bluetooth.h"
-#include "define.h"
 #include <zephyr/kernel.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/logging/log.h>
@@ -53,21 +51,6 @@ bt_channel_t ecg_channel = {
     .stale_age = BT_DATA_QUEUE_SIZE,
     .stats = &ecg_stats,
 };
-
-static int32_t get_ecg_source_sample(const bt_sample_data_t *sample) {
-    switch (ECG_SOURCE_ADC_CHANNEL) {
-        case 0:
-            return sample->ch0;
-        case 1:
-            return sample->ch1;
-        case 2:
-            return sample->ch2;
-        case 3:
-            return sample->ch3;
-        default:
-            return sample->ch0;
-    }
-}
 
 /* ========== GATT Callbacks ========== */
 
@@ -144,10 +127,5 @@ int bluetooth_queue_sample(int32_t ch0, int32_t ch1, int32_t ch2, int32_t ch3, u
         .timestamp = timestamp,
     };
     int err = channel_queue_put(&ecg_channel, &sample);
-#if BT_ENABLE_RAW_ECG_CHAR
-    if (err == 0) {
-        (void) bluetooth_queue_raw_ecg_sample(get_ecg_source_sample(&sample), timestamp);
-    }
-#endif
     return err;
 }

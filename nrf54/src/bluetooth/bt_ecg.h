@@ -11,13 +11,6 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <stdint.h>
 
-/*
- * Build-time switch for optional raw ECG characteristic.
- * 0: send only the main ADC characteristic.
- * 1: also expose a separate raw ECG characteristic sourced from CH0.
- */
-#define BT_ENABLE_RAW_ECG_CHAR 1
-
 /* Main ADC queue and batching configuration */
 #define BT_DATA_QUEUE_SIZE   512    /* Buffer 512 samples = 10.24 seconds @ 50Hz */
 #define BT_QUEUE_WARN_LEVEL  384    /* Warn when 75% full */

@@ -1,11 +1,10 @@
-# ECG Belt GUI (Python)
+# TENG Sensor Scope GUI (Python)
 
-Super simple desktop GUI that connects over BLE and displays:
+Desktop GUI that connects over BLE and displays:
 
-- Heart rate (BPM) + RR interval (from standard BLE Heart Rate Measurement `0x2A37`)
-- Raw ECG samples from CH0 (custom characteristic)
-- ADS131M04 channel samples CH0, CH1, CH2, and CH3 (custom characteristic)
-- IMU samples (custom characteristic)
+- Calibrated ADS131M04 channel voltages CH0, CH1, CH2, and CH3
+- Per-channel visibility, plot window length, and display filter controls
+- Firmware logs over NUS in the launching terminal
 
 ## Run (uv)
 
@@ -14,15 +13,31 @@ From the repo root:
 ```bash
 cd gui
 uv sync
-uv run ecg-belt-gui
+uv run teng-sensor-scope
 ```
+
+The old `uv run ecg-belt-gui` command remains as a compatibility alias.
+
+## Voltage Scaling
+
+- The firmware streams raw signed ADS131M04 counts.
+- CH0 and CH1 use the 100k/15k voltage dividers and are displayed as source voltage.
+- CH2 and CH3 have no divider and are displayed as direct ADC input voltage.
+- Per-channel trim constants live in `src/ecg_belt_gui/app.py` as `CHANNEL_TRIM_GAIN` and `CHANNEL_TRIM_OFFSET_V`.
+
+## Scope Settings
+
+Use the **Settings** button to:
+
+- Hide or show individual channels.
+- Set the visible plot window in seconds.
+- Set the ADS131M04 output data rate from the standard OSR-derived rates.
+- Enable and tune the display-only Butterworth low-pass filter cutoff.
+- Enable or disable the display-only 50 Hz notch filter.
+- Firmware samples on ADS131M04 DRDY events at the selected output data rate.
 
 ## Notes
 
-- The firmware device name is expected to be `ECG_Belt`.
+- The firmware device name is expected to be `TENG_Scope`.
 - BLE UUIDs are defined in `nrf54/src/bluetooth/bluetooth.c`.
-- The firmware now uses an `ADS131M04` driver.
-- All four ADS131M04 channels are enabled and streamed over BLE.
-- The raw ECG plot and the HR pipeline use CH0 on this PCB.
-- On the current PCB, CH1, CH2, and CH3 are floating and may look noisy or rail.
 - GUI toolkit: Qt via `PySide6`.

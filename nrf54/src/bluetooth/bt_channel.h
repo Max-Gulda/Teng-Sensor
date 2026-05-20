@@ -3,7 +3,7 @@
  * @brief Generic Bluetooth channel pipeline — internal to src/bluetooth/.
  *
  * Defines the shared types and pipeline function declarations used by all
- * data channels (ADC, raw ECG, IMU). Not part of the public API.
+ * data channels. Not part of the public API.
  */
 
 #ifndef BT_CHANNEL_H
@@ -17,8 +17,6 @@
 
 /* Fixed payload size for DLQ entries.
  *   ADC:     12 samples × 20 bytes = 240 bytes
- *   RAW ECG: 20 samples × 8 bytes  = 160 bytes (optional)
- *   IMU:     15 samples × 16 bytes = 240 bytes
  * A _Static_assert in bluetooth.c validates this at compile time.
  */
 #define BT_MAX_BATCH_PAYLOAD 240
@@ -44,7 +42,7 @@ typedef struct {
 /**
  * @brief Generic channel descriptor.
  *
- * All runtime state for one data channel (ecg/raw-ecg/imu).
+ * All runtime state for one data channel.
  * The generic send/retry/batch/queue functions operate entirely through this struct.
  */
 typedef struct {

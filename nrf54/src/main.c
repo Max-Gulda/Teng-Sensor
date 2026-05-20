@@ -6,11 +6,9 @@
 
 #include <zephyr/kernel.h>
 #include "ads131m04_spi.h"
-#include "lsm6dso_spi.h"
 #include "sampling.h"
 #include "bluetooth.h"
 #include "ble_log_backend.h"
-#include "ecg.h"
 #include <zephyr/logging/log.h>
 #include <zephyr/debug/cpu_load.h>
 
@@ -19,9 +17,8 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 int main(void) {
     int err;
     ads131m04_config_t *adc_config;
-    lsm6dso_config_t *imu_config;
 
-    LOG_INF("=== ADS131M04 Task-Based Sampling @ %d Hz ===", SAMPLING_FREQUENCY_HZ);
+    LOG_INF("=== ADS131M04 oscilloscope sampling (DRDY-driven) ===");
     
     /* ------------ INIT BLUETOOTH START ------------*/
 
@@ -57,36 +54,6 @@ int main(void) {
     }
 
     /* ------------ INIT ADS131M04 END --------------*/
-
-    /* ------------ INIT LSM6DSO START -------------*/
-
-    /* Get IMU configuration */
-    imu_config = lsm6dso_get_config();
-
-    /* Perform full IMU setup */
-    err = lsm6dso_full_setup(imu_config);
-    if (err < 0) {
-        LOG_ERR("Failed to setup IMU (%d)", err);
-        return 0;
-    }
-
-    /* ------------ INIT LSM6DSO END ---------------*/
-
-    /* ------------ INIT ECG START ------------*/
-    err = ecg_init();
-    if (err < 0) {
-        LOG_ERR("Failed to initialize ecg (%d)", err);
-        return 0;
-    }
-
-    err = ecg_start();
-    if (err < 0) {
-        LOG_ERR("Failed to start ecg (%d)", err);
-        return 0;
-    }
-
-    /* ------------ INIT ECG END ------------*/
-
 
     /* ------------ INIT SAMPLING START ------------*/
 

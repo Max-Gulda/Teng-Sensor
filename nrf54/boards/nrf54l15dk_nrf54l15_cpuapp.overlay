@@ -12,21 +12,13 @@
 // You can also visit the nRF DeviceTree extension documentation at https: //docs.nordicsemi.com/bundle/nrf-connect-vscode/page/guides/ncs_configure_app.html#devicetree-support-in-the-extension
 /* uart20 is being used for serial communication, so use spi21*/
 
-/ {
-    zephyr,user {
-        /* LSM6DSO interrupt pins: INT1=P1.05, INT2=P1.06 */
-        int1-gpios = <&gpio1 5 GPIO_ACTIVE_HIGH>;
-        int2-gpios = <&gpio1 6 GPIO_ACTIVE_HIGH>;
-    };
-};
-
 &gpio1 {
     status = "okay";
 };
 
 &spi21 {
     status = "okay";
-    cs-gpios = <&gpio1 4 GPIO_ACTIVE_LOW>, <&gpio1 12 GPIO_ACTIVE_LOW>; /* P1.04 IMU, P1.12 ADC */
+    cs-gpios = <&gpio1 12 GPIO_ACTIVE_LOW>; /* P1.12 ADC */
     pinctrl-0 = <&spi21_default>;
     pinctrl-1 = <&spi21_sleep>;
     pinctrl-names = "default", "sleep";

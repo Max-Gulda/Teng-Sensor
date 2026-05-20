@@ -778,7 +778,7 @@ void ads131m04_calibrate(ads131m04_config_t *config) {
  * This is provided by the nRF54L15 GRTC clock output configured in the
  * devicetree overlay.
  */
-#define ADS131M04_CS_IDX    1
+#define ADS131M04_CS_IDX    0
 #define ADS131M04_GPIO_NODE DT_NODELABEL(gpio1)
 #define ADS131M04_DRDY_PIN  9
 #define ADS131M04_RESET_PIN 10
@@ -835,13 +835,13 @@ int ads131m04_full_setup(ads131m04_config_t *config) {
         return err;
     }
 
-    err = ads131m04_set_oversampling(config, ADS131M04_OSR_128);
+    err = ads131m04_set_oversampling(config, ADS131M04_OSR_8192);
     if (err < 0) {
         LOG_ERR("Failed to set OSR (%d)\n", err);
         return err;
     }
 
-    err = ads131m04_set_channel_gain(config, 0, ADS131M04_GAIN_8);
+    err = ads131m04_set_channel_gain(config, 0, ADS131M04_GAIN_1);
     if (err < 0) {
         LOG_ERR("Failed to set CH0 gain (%d)\n", err);
         return err;

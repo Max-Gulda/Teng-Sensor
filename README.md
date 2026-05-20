@@ -1,20 +1,17 @@
-# ECG Belt
+# TENG Sensor Scope
 
 This repository contains two parts:
 
 - `nrf54/`: Zephyr firmware for the Nordic **nRF54L15 DK target** (`nrf54l15dk/nrf54l15/cpuapp`) used by the course board setup
-- `gui/`: a super simple Python GUI that connects over BLE and shows streamed sensor + computed values
+- `gui/`: a Python BLE scope GUI that displays calibrated ADS131M04 voltage streams
 
-Minimal Zephyr RTOS firmware intended for the course **proprietary ECG belt board** (distributed alongside this repo). The Zephyr build target used for this course setup is:
+Minimal Zephyr RTOS firmware intended for the course proprietary board setup. The Zephyr build target used for this course setup is:
 
 - `nrf54l15dk/nrf54l15/cpuapp`
 
-The firmware samples:
+The firmware samples **ADS131M04** 24-bit ADC data. All 4 ADC channels are enabled and streamed over BLE as signed raw counts. CH0 and CH1 are intended to be displayed as source voltage through the 100k/15k input dividers; CH2 and CH3 are direct ADC input voltage.
 
-- **ADS131M04** 24-bit ADC. All 4 ADC channels are enabled in the default firmware setup. CH0 is the ECG/heart input on this PCB and feeds the HR pipeline; CH1, CH2, and CH3 are currently floating on the board but are still streamed over BLE.
-- **LSM6DSO** 6-axis IMU (accel + gyro)
-
-It runs **Pan‑Tompkins** heart rate detection in real time and transmits data over **Bluetooth LE** (custom GATT characteristics + Nordic UART Service (NUS) for logs).
+It transmits data over **Bluetooth LE** using custom GATT characteristics plus Nordic UART Service (NUS) for logs and scope commands.
 
 ## Attribution
 
@@ -29,40 +26,33 @@ Created by:
 
 | Thread | Priority | What it does | Key code |
 |---|---:|---|---|
-| Sampling | 5 | Reads ADC + IMU at the configured rate and queues data to BLE + ECG processing | `nrf54/src/sampling/sampling.c` |
-| ECG | 6 | Runs Pan‑Tompkins on the ECG stream; emits HR (and RR interval) over BLE | `nrf54/src/ecg/ecg.c`, `nrf54/src/pan_tompkins/` |
-| Bluetooth | 7 | Batches and transmits ADC/raw-ECG/IMU notifications; manages connect/disconnect | `nrf54/src/bluetooth/bluetooth.c`, `nrf54/src/bluetooth/bt_*.c` |
+| Sampling | 5 | Reads ADC on ADS131M04 DRDY falling edges and queues data to BLE | `nrf54/src/sampling/sampling.c` |
+| Bluetooth | 7 | Batches and transmits ADC notifications; manages connect/disconnect | `nrf54/src/bluetooth/bluetooth.c`, `nrf54/src/bluetooth/bt_*.c` |
 | Main | default | Initialization + periodic CPU load logging | `nrf54/src/main.c` |
 
 ### Data flow
 
 ```text
-ADS131M04 CH0 ─────► sampling_thread ──► ecg_queue ──► ecg_thread ──► Pan‑Tompkins ──► BLE HR notifications
 ADS131M04 CH0-CH3 ─► sampling_thread ───────────────────────────────────────────────► BLE ADC channel (batched notifications)
-LSM6DSO   ──► sampling_thread ───────────────► BLE IMU channel (batched notifications)
 LOG_* / printk ─────────────────────────────► NUS (BLE log backend)
 ```
 
 ### Source layout (firmware)
 
 - `nrf54/src/ads131m04_spi/` — ADS131M04 SPI driver + configuration
-- `nrf54/src/lsm6dso_spi/` — LSM6DSO SPI driver + configuration
-- `nrf54/src/sampling/` — timed sampling thread, queues to BLE + ECG
-- `nrf54/src/ecg/` — ECG thread + Pan‑Tompkins integration
-- `nrf54/src/pan_tompkins/` — R‑peak detection and BPM/RR logic
-- `nrf54/src/filters/` — signal processing utilities used by the ECG pipeline
-- `nrf54/src/bluetooth/` — BLE GATT services, batching, queues, and HR notifications
+- `nrf54/src/sampling/` — DRDY-driven sampling thread, queues ADC frames to BLE
+- `nrf54/src/bluetooth/` — BLE GATT services, batching, queues, and notifications
 - `nrf54/src/ble_log_backend/` — routes Zephyr `LOG_*` output over BLE (NUS)
-- `nrf54/src/circ_buffer/` — static circular buffer utilities used by the ECG/Pan‑Tompkins path
 
 ### ADS131M04 notes
 
 - The old `ads131m02_spi` module was renamed to `ads131m04_spi`.
 - The driver parses 4 ADC channels and exposes CH0, CH1, CH2, and CH3 in `ads131m04_data_t`.
 - The default setup in `ads131m04_full_setup()` enables all four channels.
-- CH0 is the ECG/heart channel on the PCB and is used for the raw ECG BLE characteristic and the HR pipeline.
-- CH1, CH2, and CH3 are currently floating on the PCB, so their plots/values are expected to be noisy or rail.
-- The main custom BLE ADC payload now carries timestamp + CH0 + CH1 + CH2 + CH3.
+- CH0 and CH1 have 100k/15k dividers and are converted to source voltage in the GUI.
+- CH2 and CH3 have no divider and are converted to direct ADC input voltage in the GUI.
+- The main custom BLE ADC payload carries timestamp + CH0 + CH1 + CH2 + CH3.
+- Sampling is driven by the ADS131M04 DRDY pin. The default ADC OSR is 8192 (500 SPS), and the GUI can switch among the standard ADS131M04 output data rates.
 
 ## Build and run (VS Code + nRF Connect extension)
 
@@ -137,10 +127,12 @@ To flash **over Bluetooth** using the **nRF Device Manager** mobile app:
 
 ## GUI (Python)
 
-To run the super simple BLE GUI:
+To run the BLE scope GUI:
 
 ```bash
 cd gui
 uv sync
-uv run ecg-belt-gui
+uv run teng-sensor-scope
 ```
+
+Use **Settings** in the GUI to choose visible channels and plot window length.

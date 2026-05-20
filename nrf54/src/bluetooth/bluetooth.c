@@ -2,7 +2,7 @@
  * @file bluetooth.c
  * @brief Bluetooth core: GATT service, connection management, advertising, thread.
  *
- * Channel-specific logic lives in bt_ecg.c, bt_imu.c, bt_hr.c.
+ * Channel-specific logic lives in bt_ecg.c.
  * Generic pipeline (batching, DLQ, notify) lives in bt_channel.c.
  *
  * Adding a new data channel requires:
@@ -21,9 +21,6 @@
 
 #include "bluetooth.h"
 #include "bt_ecg.h"
-#include "bt_ecg_raw.h"
-#include "bt_imu.h"
-#include "bt_hr.h"
 #include "sampling.h"
 #include <zephyr/kernel.h>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -32,44 +29,28 @@
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/sys/atomic.h>
+#include <zephyr/sys/util.h>
 #include <zephyr/logging/log.h>
 #include <bluetooth/services/nus.h>
+#include <stdlib.h>
+#include <string.h>
 
 LOG_MODULE_REGISTER(bluetooth, LOG_LEVEL_INF);
 
 /* Compile-time checks: every channel batch must fit inside BT_MAX_BATCH_PAYLOAD. */
 _Static_assert(BT_BATCH_SIZE * sizeof(adc_data_t) <= BT_MAX_BATCH_PAYLOAD,
     "ADC batch payload exceeds BT_MAX_BATCH_PAYLOAD");
-_Static_assert(BT_IMU_BATCH_SIZE * sizeof(imu_data_t) <= BT_MAX_BATCH_PAYLOAD,
-    "IMU batch payload exceeds BT_MAX_BATCH_PAYLOAD");
-#if BT_ENABLE_RAW_ECG_CHAR
-_Static_assert(BT_ECG_RAW_BATCH_SIZE * sizeof(ecg_raw_data_t) <= BT_MAX_BATCH_PAYLOAD,
-    "Raw ECG batch payload exceeds BT_MAX_BATCH_PAYLOAD");
-#endif
-
 /* ========== UUIDs ========== */
 
-/* Custom 128-bit UUIDs for ADC/IMU service */
+/* Custom 128-bit UUIDs for ADC service */
 #define BT_UUID_ECG_SERVICE_VAL \
     BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x5678, 0x1234, 0x56789abcdef0)
 
 #define BT_UUID_ECG_DATA_VAL \
     BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x5678, 0x1234, 0x56789abcdef1)
 
-#define BT_UUID_IMU_DATA_VAL \
-    BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x5678, 0x1234, 0x56789abcdef2)
-
-#define BT_UUID_ECG_RAW_DATA_VAL \
-    BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x5678, 0x1234, 0x56789abcdef3)
-
 #define BT_UUID_ECG_SERVICE    BT_UUID_DECLARE_128(BT_UUID_ECG_SERVICE_VAL)
 #define BT_UUID_ECG_DATA       BT_UUID_DECLARE_128(BT_UUID_ECG_DATA_VAL)
-#define BT_UUID_IMU_DATA       BT_UUID_DECLARE_128(BT_UUID_IMU_DATA_VAL)
-#define BT_UUID_ECG_RAW_DATA   BT_UUID_DECLARE_128(BT_UUID_ECG_RAW_DATA_VAL)
-
-/* Standard Heart Rate Service UUIDs (BT SIG assigned) */
-/* BT_UUID_HRS (0x180D), BT_UUID_HRS_MEASUREMENT (0x2A37),
- * BT_UUID_HRS_BODY_SENSOR (0x2A38) are defined in <zephyr/bluetooth/uuid.h> */
 
 /* ========== Connection State ========== */
 
@@ -83,17 +64,50 @@ static volatile uint32_t bt_disconnects = 0;
 
 static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
-    /* GAP Appearance: Generic Heart Rate Sensor (0x0340), little-endian */
-    BT_DATA_BYTES(BT_DATA_GAP_APPEARANCE, 0x40, 0x03),
-    /* Standard HRS UUID so generic HR scanner apps can discover this device */
-    BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_16_ENCODE(BT_UUID_HRS_VAL)),
-    /* Custom ADC/IMU service UUID */
+    /* Custom ADC service UUID */
     BT_DATA_BYTES(BT_DATA_UUID128_ALL, BT_UUID_ECG_SERVICE_VAL),
 };
 
 static const struct bt_data sd[] = {
     BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
 };
+
+/* ========== NUS Command Handling ========== */
+
+static void handle_ads131_rate_command(const char *value) {
+    char *end = NULL;
+    unsigned long sample_rate_hz = strtoul(value, &end, 10);
+
+    if (end == value || sample_rate_hz > UINT32_MAX) {
+        LOG_WRN("Invalid ads131_rate command value: %s", value);
+        return;
+    }
+
+    int err = sampling_set_ads131_sample_rate_hz((uint32_t)sample_rate_hz);
+    if (err < 0) {
+        LOG_WRN("Failed to set ADS131M04 sample rate to %lu SPS (err %d)",
+            sample_rate_hz, err);
+    }
+}
+
+static void nus_received(struct bt_conn *conn, const uint8_t *const data, uint16_t len) {
+    ARG_UNUSED(conn);
+
+    char command[64];
+    size_t copy_len = MIN(len, sizeof(command) - 1);
+    memcpy(command, data, copy_len);
+    command[copy_len] = '\0';
+
+    while (copy_len > 0 && (command[copy_len - 1] == '\n' || command[copy_len - 1] == '\r')) {
+        command[--copy_len] = '\0';
+    }
+
+    if (strncmp(command, "ads131_rate ", strlen("ads131_rate ")) == 0) {
+        handle_ads131_rate_command(command + strlen("ads131_rate "));
+    } else {
+        LOG_WRN("Unknown NUS command: %s", command);
+    }
+}
 
 /* ========== Advertising Restart ========== */
 
@@ -148,10 +162,6 @@ static void connected_callback(struct bt_conn *conn, uint8_t err) {
 
     if (conn_count == 1) {
         bt_ecg_reset_on_connect();
-#if BT_ENABLE_RAW_ECG_CHAR
-        bt_ecg_raw_reset_on_connect();
-#endif
-        bt_imu_reset_on_connect();
         sampling_restore_fast_rate();
     }
 
@@ -178,11 +188,6 @@ static void disconnected_callback(struct bt_conn *conn, uint8_t reason) {
 
     if (conn_count == 0) {
         bt_ecg_on_disconnect();
-#if BT_ENABLE_RAW_ECG_CHAR
-        bt_ecg_raw_on_disconnect();
-#endif
-        bt_imu_on_disconnect();
-        bt_hr_on_disconnect();
     }
 
     if (conn_count < CONFIG_BT_MAX_CONN) {
@@ -199,17 +204,11 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
 /* ========== GATT Service Definitions ========== */
 
 /*
- * Custom ADC/IMU service attribute indices:
+ * Custom ADC service attribute indices:
  *   [0]  Primary Service
  *   [1]  ADC Char Declaration  -> ecg_channel.gatt_attr_idx = 1
  *   [2]  ADC Char Value
  *   [3]  ADC CCC
- *   [4]  IMU Char Declaration  -> imu_channel.gatt_attr_idx = 4
- *   [5]  IMU Char Value
- *   [6]  IMU CCC
- *   [7]  Raw ECG Char Declaration (optional) -> ecg_raw_channel.gatt_attr_idx = 7
- *   [8]  Raw ECG Char Value (optional)
- *   [9]  Raw ECG CCC (optional)
  */
 BT_GATT_SERVICE_DEFINE(ecg_service,
     BT_GATT_PRIMARY_SERVICE(BT_UUID_ECG_SERVICE),
@@ -218,49 +217,7 @@ BT_GATT_SERVICE_DEFINE(ecg_service,
         BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
         BT_GATT_PERM_READ,
         read_ecg_data, NULL, NULL),
-    BT_GATT_CCC(data_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
-
-    BT_GATT_CHARACTERISTIC(BT_UUID_IMU_DATA,
-        BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
-        BT_GATT_PERM_READ,
-        read_imu_data, NULL, NULL),
-    BT_GATT_CCC(imu_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE)
-
-#if BT_ENABLE_RAW_ECG_CHAR
-    ,
-    BT_GATT_CHARACTERISTIC(BT_UUID_ECG_RAW_DATA,
-        BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
-        BT_GATT_PERM_READ,
-        read_ecg_raw_data, NULL, NULL),
-    BT_GATT_CCC(raw_ecg_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE)
-#endif
-);
-
-/*
- * Standard Bluetooth Heart Rate Service (assigned number 0x180D).
- * Attribute indices:
- *   [0]  Primary Service (0x180D)
- *   [1]  HRM Char Declaration  -> bt_hr.c notify uses hrs_service.attrs[1]
- *   [2]  HRM Char Value        (Heart Rate Measurement 0x2A37)
- *   [3]  HRM CCC
- *   [4]  Body Sensor Location Char Declaration
- *   [5]  Body Sensor Location Char Value (0x2A38)
- */
-BT_GATT_SERVICE_DEFINE(hrs_service,
-    BT_GATT_PRIMARY_SERVICE(BT_UUID_HRS),
-
-    /* Heart Rate Measurement: notify-only per spec (no read permission) */
-    BT_GATT_CHARACTERISTIC(BT_UUID_HRS_MEASUREMENT,
-        BT_GATT_CHRC_NOTIFY,
-        BT_GATT_PERM_NONE,
-        NULL, NULL, NULL),
-    BT_GATT_CCC(hr_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
-
-    /* Body Sensor Location: read-only, value = Chest (1) */
-    BT_GATT_CHARACTERISTIC(BT_UUID_HRS_BODY_SENSOR,
-        BT_GATT_CHRC_READ,
-        BT_GATT_PERM_READ,
-        read_body_sensor_location, NULL, NULL),
+    BT_GATT_CCC(data_ccc_changed, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE)
 );
 
 /* ========== Bluetooth Thread ========== */
@@ -268,23 +225,18 @@ BT_GATT_SERVICE_DEFINE(hrs_service,
 /**
  * @brief Bluetooth transmission thread.
  *
- * Blocks on the ADC queue with a timeout, then drains the IMU queue
- * non-blocking. Flushes partial batches for both channels on timeout.
+ * Blocks on the ADC queue with a timeout and flushes partial batches.
  */
 static void bluetooth_thread(void *arg1, void *arg2, void *arg3) {
     ARG_UNUSED(arg1);
     ARG_UNUSED(arg2);
     ARG_UNUSED(arg3);
 
-    LOG_INF("Bluetooth thread started (priority %d, adc_batch=%d, imu_batch=%d)",
-        BT_THREAD_PRIORITY, BT_BATCH_SIZE, BT_IMU_BATCH_SIZE);
+    LOG_INF("Bluetooth thread started (priority %d, adc_batch=%d)",
+        BT_THREAD_PRIORITY, BT_BATCH_SIZE);
 
     /* Initialise batch timers before entering the loop */
     bt_ecg_reset_on_connect();
-#if BT_ENABLE_RAW_ECG_CHAR
-    bt_ecg_raw_reset_on_connect();
-#endif
-    bt_imu_reset_on_connect();
 
     while (1) {
         /* Block on ADC queue with timeout */
@@ -298,22 +250,6 @@ static void bluetooth_thread(void *arg1, void *arg2, void *arg3) {
         } else {
             LOG_ERR("Failed to get ADC sample from queue: %d", err);
         }
-
-#if BT_ENABLE_RAW_ECG_CHAR
-        bt_ecg_raw_sample_data_t raw_sample;
-        while (k_msgq_get(ecg_raw_channel.queue, &raw_sample, K_NO_WAIT) == 0) {
-            bt_ecg_raw_process_sample(&raw_sample);
-        }
-        bt_ecg_raw_flush_if_timeout();
-#endif
-
-        /* Drain IMU queue (non-blocking) */
-        bt_imu_sample_data_t imu_sample;
-        while (k_msgq_get(imu_channel.queue, &imu_sample, K_NO_WAIT) == 0) {
-            bt_imu_process_sample(&imu_sample);
-        }
-
-        bt_imu_flush_if_timeout();
     }
 }
 
@@ -332,7 +268,9 @@ int bluetooth_init(void) {
         return err;
     }
 
-    static struct bt_nus_cb nus_cb = { 0 };
+    static struct bt_nus_cb nus_cb = {
+        .received = nus_received,
+    };
     err = bt_nus_init(&nus_cb);
     if (err) {
         LOG_ERR("NUS init failed (err %d)", err);
@@ -383,7 +321,6 @@ void bluetooth_get_stats(bt_stats_t *stats) {
     }
 
     bt_ecg_get_stats(&stats->adc);
-    bt_imu_get_stats(&stats->imu);
     stats->bt_disconnects = bt_disconnects;
     stats->connected = connected;
 }
@@ -400,12 +337,6 @@ void bluetooth_print_stats(bt_stats_t *stats) {
     LOG_INF("  ADC stale: %u", stats->adc.samples_discarded_stale);
     LOG_INF("  ADC dlq: %u/%u overflows", stats->adc.dlq_count, stats->adc.dlq_overflows);
     LOG_INF("  ADC queue: %u/%u", stats->adc.current_queue_used, stats->adc.max_queue_used);
-    LOG_INF("  IMU sent: %u", stats->imu.samples_sent);
-    LOG_INF("  IMU overflow: %u", stats->imu.queue_overflows);
-    LOG_INF("  IMU retries: %u", stats->imu.batch_retries);
-    LOG_INF("  IMU stale: %u", stats->imu.samples_discarded_stale);
-    LOG_INF("  IMU dlq: %u/%u overflows", stats->imu.dlq_count, stats->imu.dlq_overflows);
-    LOG_INF("  IMU queue: %u/%u", stats->imu.current_queue_used, stats->imu.max_queue_used);
     LOG_INF("  disconnects: %u", stats->bt_disconnects);
     LOG_INF("  connected: %d", stats->connected);
     LOG_INF("----------------------");
@@ -413,7 +344,6 @@ void bluetooth_print_stats(bt_stats_t *stats) {
 
 void bluetooth_reset_stats(void) {
     bt_ecg_reset_stats();
-    bt_imu_reset_stats();
     LOG_INF("Bluetooth statistics reset");
 }
 
