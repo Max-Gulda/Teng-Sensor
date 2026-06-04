@@ -1,6 +1,6 @@
 /**
  * @file sampling.h
- * @brief DRDY-synchronized ADC sampling system
+ * @brief DRDY interrupt-synchronized ADC sampling system
  */
 
 #ifndef SAMPLING_H
@@ -22,7 +22,7 @@
 /* Sampling statistics structure */
 typedef struct {
     uint32_t total_samples;       /* Total samples taken */
-    uint32_t missed_samples;      /* Number of DRDY wait timeouts */
+    uint32_t missed_samples;      /* Number of DRDY interrupt timeouts or coalesced edges */
     uint32_t max_jitter_us;       /* Longest observed inter-sample period in microseconds */
     uint64_t last_period_us;      /* Last measured sampling period */
 } sampling_stats_t;
@@ -35,7 +35,7 @@ typedef struct {
 int sampling_init(ads131m04_config_t *adc_config);
 
 /**
- * @brief Start the DRDY-driven sampling thread
+ * @brief Start the DRDY interrupt-driven sampling thread
  * @return 0 on success, negative error code on failure
  */
 int sampling_start(void);
@@ -71,7 +71,7 @@ int sampling_set_ads131_sample_rate_hz(uint32_t sample_rate_hz);
 uint32_t sampling_get_ads131_sample_rate_hz(void);
 
 /**
- * @brief Wake DRDY-driven sampling after BLE connection
+ * @brief Wake DRDY interrupt-driven sampling after BLE connection
  * Called by bluetooth module when connection is established
  */
 void sampling_restore_fast_rate(void);
