@@ -2,7 +2,7 @@
 name = "teng-sensor-scope"
 version = "0.1.0"
 description = "BLE oscilloscope GUI for calibrated ADS131M04 voltage streams"
-requires-python = ">=3.11"
+requires-python = ">=3.13,<3.14"
 dependencies = [
   "bleak>=0.22.0",
   "pyside6>=6.7.0",
@@ -20,3 +20,4 @@ packages = ["src/ecg_belt_gui"]
 [project.scripts]
 ecg-belt-gui = "ecg_belt_gui.app:main"
 teng-sensor-scope = "ecg_belt_gui.app:main"
+gui = "ecg_belt_gui.app:main"
