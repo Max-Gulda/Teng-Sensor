@@ -1,6 +1,7 @@
 import asyncio
 import csv
 from datetime import datetime
+from html import escape
 import math
 import queue
 import struct
@@ -238,6 +239,7 @@ ADC_CHANNEL_LABELS = (
     "CH3 ADC V",
 )
 ADC_CHANNEL_COLORS = ("#00e5ff", "#ffb300", "#4caf50", "#ff5252")
+ADC_CHANNEL_COLORS_LIGHT = ("#0077b6", "#b26a00", "#2e7d32", "#c62828")
 SETTINGS_ORG = "TENG Sensor"
 SETTINGS_APP = "Data Collector"
 SETTINGS_CHANNEL_VISIBLE = "scope/channel_visible"
@@ -247,6 +249,7 @@ SETTINGS_LOWPASS_ENABLED = "scope/lowpass_enabled"
 SETTINGS_LOWPASS_CUTOFF_HZ = "scope/lowpass_cutoff_hz"
 SETTINGS_NOTCH_ENABLED = "scope/notch_50hz_enabled"
 SETTINGS_ADS131_SAMPLE_RATE_HZ = "scope/ads131_sample_rate_hz"
+SETTINGS_THEME = "scope/theme"
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 RECORDINGS_DIR = PROJECT_ROOT / "Recordings"
 
@@ -374,18 +377,18 @@ class App(QtWidgets.QWidget):
         return cls._make_icon(draw)
 
     @classmethod
-    def _make_record_stop_icon(cls) -> QtGui.QIcon:
+    def _make_record_stop_icon(cls, color: str = "#ff3b30") -> QtGui.QIcon:
         def draw(painter: QtGui.QPainter):
             painter.setPen(QtCore.Qt.PenStyle.NoPen)
-            painter.setBrush(QtGui.QColor("#ff3b30"))
+            painter.setBrush(QtGui.QColor(color))
             painter.drawRoundedRect(QtCore.QRectF(9, 9, 14, 14), 2, 2)
 
         return cls._make_icon(draw)
 
     @classmethod
-    def _disconnect_icon(cls) -> QtGui.QIcon:
+    def _disconnect_icon(cls, color: str) -> QtGui.QIcon:
         def draw(painter: QtGui.QPainter):
-            pen = QtGui.QPen(QtGui.QColor("#d7d7d7"), 3.0, QtCore.Qt.PenStyle.SolidLine)
+            pen = QtGui.QPen(QtGui.QColor(color), 3.0, QtCore.Qt.PenStyle.SolidLine)
             pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
             painter.setPen(pen)
             painter.drawLine(QtCore.QPointF(10, 10), QtCore.QPointF(22, 22))
@@ -394,14 +397,14 @@ class App(QtWidgets.QWidget):
         return cls._make_icon(draw)
 
     @classmethod
-    def _settings_sliders_icon(cls) -> QtGui.QIcon:
+    def _settings_sliders_icon(cls, color: str) -> QtGui.QIcon:
         def draw(painter: QtGui.QPainter):
-            pen = QtGui.QPen(QtGui.QColor("#d7d7d7"), 2.4, QtCore.Qt.PenStyle.SolidLine)
+            pen = QtGui.QPen(QtGui.QColor(color), 2.4, QtCore.Qt.PenStyle.SolidLine)
             pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
             painter.setPen(pen)
             for y, knob_x in ((10, 20), (16, 12), (22, 17)):
                 painter.drawLine(QtCore.QPointF(7, y), QtCore.QPointF(25, y))
-                painter.setBrush(QtGui.QColor("#d7d7d7"))
+                painter.setBrush(QtGui.QColor(color))
                 painter.drawEllipse(QtCore.QPointF(knob_x, y), 2.8, 2.8)
 
         return cls._make_icon(draw)
@@ -420,6 +423,8 @@ class App(QtWidgets.QWidget):
         self._recording_file: TextIO | None = None
         self._recording_writer: Any | None = None
         self._recording_path: Path | None = None
+        self._theme = self._load_theme()
+        self._last_adc_values: list[float] | None = None
 
         self._adc_ch0_buf: list[float] = []
         self._adc_ch1_buf: list[float] = []
@@ -450,6 +455,7 @@ class App(QtWidgets.QWidget):
         self._status = QtWidgets.QLabel("Disconnected")
         self._device = QtWidgets.QLabel("-")
         self._adc_last = QtWidgets.QLabel("-")
+        self._adc_last.setTextFormat(QtCore.Qt.TextFormat.RichText)
         self._adc_note = QtWidgets.QLabel(
             "CH0 and CH1 are shown as source voltage through the 100k/15k dividers. "
             "CH2 and CH3 are shown as direct ADC input voltage."
@@ -458,6 +464,8 @@ class App(QtWidgets.QWidget):
 
         header = QtWidgets.QGridLayout()
         header.setColumnStretch(1, 1)
+        header.setHorizontalSpacing(12)
+        header.setVerticalSpacing(8)
 
         self._lbl_status = QtWidgets.QLabel("Status:")
         self._lbl_device = QtWidgets.QLabel("Device:")
@@ -481,6 +489,7 @@ class App(QtWidgets.QWidget):
         header.addWidget(self._adc_last, 4, 1)
 
         buttons = QtWidgets.QHBoxLayout()
+        buttons.setSpacing(10)
         button_icon_size = QtCore.QSize(16, 16)
         self._btn_scan = QtWidgets.QPushButton("Scan")
         self._btn_stream = QtWidgets.QPushButton("Connect")
@@ -488,11 +497,10 @@ class App(QtWidgets.QWidget):
         self._btn_record = QtWidgets.QPushButton("Record")
         self._btn_record.setCheckable(True)
         self._btn_settings = QtWidgets.QPushButton("Settings")
+        self._btn_record.setObjectName("recordButton")
         self._record_icon = self._make_record_dot_icon()
-        self._record_stop_icon = self._make_record_stop_icon()
-        self._btn_stop.setIcon(self._disconnect_icon())
+        self._record_stop_icon = self._make_record_stop_icon("#ffffff")
         self._btn_record.setIcon(self._record_icon)
-        self._btn_settings.setIcon(self._settings_sliders_icon())
         for button in (
             self._btn_scan,
             self._btn_stream,
@@ -504,30 +512,6 @@ class App(QtWidgets.QWidget):
             button.setMinimumWidth(104)
             button.setMinimumHeight(28)
             button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-            button.setStyleSheet(
-                """
-                QPushButton {
-                    background: #5a5a5a;
-                    border: 1px solid #666666;
-                    border-radius: 6px;
-                    color: #f2f2f2;
-                    font-weight: 600;
-                    padding: 5px 12px;
-                }
-                QPushButton:hover {
-                    background: #666666;
-                    border-color: #777777;
-                }
-                QPushButton:pressed {
-                    background: #4c4c4c;
-                }
-                QPushButton:disabled {
-                    background: #4a4a4a;
-                    border-color: #515151;
-                    color: #8c8c8c;
-                }
-                """
-            )
         self._btn_record.setMinimumWidth(136)
         self._chk_ac_coupling = QtWidgets.QCheckBox("AC couple display")
         self._chk_ac_coupling.setChecked(self._load_bool(SETTINGS_AC_COUPLING, False))
@@ -557,9 +541,10 @@ class App(QtWidgets.QWidget):
         self._btn_record.setEnabled(False)
 
         plots = QtWidgets.QVBoxLayout()
+        plots.setSpacing(10)
         self._adc_plots: list[pg.PlotWidget] = []
         self._adc_curves = []
-        for label, color in zip(ADC_CHANNEL_LABELS, ADC_CHANNEL_COLORS):
+        for label, color in zip(ADC_CHANNEL_LABELS, self._channel_colors()):
             plot = pg.PlotWidget(title=label)
             plot.showGrid(x=True, y=True, alpha=0.3)
             plot.setLabel("left", "Voltage", units="V")
@@ -578,9 +563,12 @@ class App(QtWidgets.QWidget):
         self._plot_timer.start()
 
         root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(12)
         root.addLayout(header)
         root.addLayout(buttons)
         root.addLayout(plots)
+        self._apply_theme()
         QtCore.QTimer.singleShot(0, self._on_scan)
 
     def _log_line(self, msg: str):
@@ -601,6 +589,200 @@ class App(QtWidgets.QWidget):
         if isinstance(value, str):
             return value.strip().lower() in ("1", "true", "yes", "on")
         return bool(value)
+
+    def _load_theme(self) -> str:
+        value = str(self._settings.value(SETTINGS_THEME, "dark") or "dark").strip().lower()
+        return value if value in ("dark", "light") else "dark"
+
+    def _theme_palette(self) -> dict[str, str]:
+        if self._theme == "light":
+            return {
+                "window": "#f4f6f8",
+                "surface": "#ffffff",
+                "surface_alt": "#eef1f4",
+                "border": "#d7dce2",
+                "border_hover": "#c4ccd5",
+                "text": "#18212b",
+                "muted": "#5b6673",
+                "disabled_bg": "#e5e8ec",
+                "disabled_text": "#9aa3ad",
+                "button": "#ffffff",
+                "button_hover": "#f2f5f8",
+                "button_pressed": "#e7ecf1",
+                "plot_bg": "#ffffff",
+                "plot_grid": "#d9dee5",
+                "icon": "#334155",
+            }
+        return {
+            "window": "#242424",
+            "surface": "#2e2e2e",
+            "surface_alt": "#383838",
+            "border": "#484848",
+            "border_hover": "#5a5a5a",
+            "text": "#f3f4f6",
+            "muted": "#b8bec7",
+            "disabled_bg": "#343434",
+            "disabled_text": "#858585",
+            "button": "#3c3c3c",
+            "button_hover": "#484848",
+            "button_pressed": "#333333",
+            "plot_bg": "#050505",
+            "plot_grid": "#303030",
+            "icon": "#e5e7eb",
+        }
+
+    def _channel_colors(self) -> tuple[str, str, str, str]:
+        return ADC_CHANNEL_COLORS_LIGHT if self._theme == "light" else ADC_CHANNEL_COLORS
+
+    def _format_adc_values(self, values: list[float]) -> str:
+        parts = []
+        for idx, (value, color) in enumerate(zip(values, self._channel_colors())):
+            label = escape(f"CH{idx}: {value:.4f} V")
+            parts.append(f'<span style="color:{color}; font-weight:600;">{label}</span>')
+        return "&nbsp;&nbsp;".join(parts)
+
+    def _apply_theme(self):
+        colors = self._theme_palette()
+        self._btn_stop.setIcon(self._disconnect_icon(colors["icon"]))
+        self._btn_settings.setIcon(self._settings_sliders_icon(colors["icon"]))
+        self.setStyleSheet(
+            f"""
+            QWidget {{
+                background: {colors["window"]};
+                color: {colors["text"]};
+                font-size: 13px;
+            }}
+            QLabel {{
+                background: transparent;
+                color: {colors["text"]};
+            }}
+            QComboBox, QSpinBox, QDoubleSpinBox {{
+                background: {colors["surface"]};
+                border: 1px solid {colors["border"]};
+                border-radius: 6px;
+                color: {colors["text"]};
+                min-height: 26px;
+                padding: 3px 28px 3px 10px;
+            }}
+            QComboBox::drop-down {{
+                border: 0;
+                width: 24px;
+            }}
+            QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover {{
+                border-color: {colors["border_hover"]};
+            }}
+            QComboBox QAbstractItemView {{
+                background: {colors["surface"]};
+                border: 1px solid {colors["border"]};
+                color: {colors["text"]};
+                outline: 0;
+                selection-background-color: {colors["surface_alt"]};
+            }}
+            QPushButton {{
+                background: {colors["button"]};
+                border: 1px solid {colors["border"]};
+                border-radius: 7px;
+                color: {colors["text"]};
+                font-weight: 600;
+                padding: 5px 12px;
+            }}
+            QPushButton:hover {{
+                background: {colors["button_hover"]};
+                border-color: {colors["border_hover"]};
+            }}
+            QPushButton:pressed {{
+                background: {colors["button_pressed"]};
+            }}
+            QPushButton:disabled {{
+                background: {colors["disabled_bg"]};
+                border-color: {colors["border"]};
+                color: {colors["disabled_text"]};
+            }}
+            QPushButton#recordButton {{
+                border-color: #d92d20;
+            }}
+            QPushButton#recordButton:checked {{
+                background: #d92d20;
+                border-color: #d92d20;
+                color: #ffffff;
+            }}
+            QCheckBox {{
+                background: transparent;
+                color: {colors["text"]};
+                spacing: 7px;
+            }}
+            QCheckBox::indicator {{
+                width: 15px;
+                height: 15px;
+                border: 1px solid {colors["border"]};
+                border-radius: 4px;
+                background: {colors["surface"]};
+            }}
+            QCheckBox::indicator:hover {{
+                border-color: {colors["border_hover"]};
+            }}
+            QCheckBox::indicator:checked {{
+                background: #2563eb;
+                border-color: #2563eb;
+            }}
+            QSlider::groove:horizontal {{
+                background: {colors["surface_alt"]};
+                border-radius: 3px;
+                height: 6px;
+            }}
+            QSlider::handle:horizontal {{
+                background: #2563eb;
+                border: 2px solid {colors["surface"]};
+                border-radius: 8px;
+                height: 16px;
+                margin: -6px 0;
+                width: 16px;
+            }}
+            QGroupBox {{
+                background: {colors["surface"]};
+                border: 1px solid {colors["border"]};
+                border-radius: 8px;
+                font-weight: 600;
+                margin-top: 12px;
+                padding: 16px 14px 14px 14px;
+            }}
+            QGroupBox::title {{
+                background: transparent;
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }}
+            QDialog {{
+                background: {colors["window"]};
+                color: {colors["text"]};
+            }}
+            QToolTip {{
+                background: {colors["surface"]};
+                border: 1px solid {colors["border"]};
+                border-radius: 5px;
+                color: {colors["text"]};
+                padding: 5px;
+            }}
+            """
+        )
+
+        if hasattr(self, "_adc_plots"):
+            axis_pen = pg.mkPen(colors["border_hover"])
+            text_pen = pg.mkPen(colors["muted"])
+            for curve, color in zip(self._adc_curves, self._channel_colors()):
+                curve.setPen(pg.mkPen(color, width=1.2))
+            for plot, label in zip(self._adc_plots, ADC_CHANNEL_LABELS):
+                plot.setBackground(colors["plot_bg"])
+                plot.setTitle(label, color=colors["muted"])
+                plot.setLabel("left", "Voltage", units="V", color=colors["muted"])
+                plot.setLabel("bottom", "Time", units="s", color=colors["muted"])
+                plot.showGrid(x=True, y=True, alpha=0.28 if self._theme == "light" else 0.35)
+                for axis_name in ("left", "bottom"):
+                    axis = plot.getAxis(axis_name)
+                    axis.setPen(axis_pen)
+                    axis.setTextPen(text_pen)
+        if self._last_adc_values is not None:
+            self._adc_last.setText(self._format_adc_values(self._last_adc_values))
 
     def _load_window_seconds(self) -> float:
         value = self._settings.value(SETTINGS_WINDOW_SECONDS, DEFAULT_WINDOW_SECONDS)
@@ -650,6 +832,7 @@ class App(QtWidgets.QWidget):
         self._settings.setValue(SETTINGS_LOWPASS_ENABLED, self._lowpass_enabled)
         self._settings.setValue(SETTINGS_LOWPASS_CUTOFF_HZ, self._lowpass_cutoff_hz)
         self._settings.setValue(SETTINGS_NOTCH_ENABLED, self._notch_enabled)
+        self._settings.setValue(SETTINGS_THEME, self._theme)
         self._settings.sync()
 
     def _create_lowpass_filters(self) -> list[ButterworthLowpass]:
@@ -740,14 +923,10 @@ class App(QtWidgets.QWidget):
             writer = csv.writer(handle)
             writer.writerow([
                 "sample_index",
-                "ch0_counts",
-                "ch1_counts",
-                "ch2_counts",
-                "ch3_counts",
-                "ch0_volts",
-                "ch1_volts",
-                "ch2_volts",
-                "ch3_volts",
+                "ch0_mV",
+                "ch1_mV",
+                "ch2_mV",
+                "ch3_mV",
             ])
         except OSError as exc:
             self._recording_file = None
@@ -787,14 +966,13 @@ class App(QtWidgets.QWidget):
         self._btn_record.setIcon(self._record_icon)
         self._btn_record.blockSignals(False)
 
-    def _record_adc_sample(self, sample_idx: int, counts: tuple[int, int, int, int], values: list[float]):
+    def _record_adc_sample(self, sample_idx: int, values: list[float]):
         writer = self._recording_writer
         if writer is None:
             return
         writer.writerow([
             int(sample_idx),
-            *[int(count) for count in counts],
-            *[f"{value:.9g}" for value in values],
+            *[f"{value * 1000.0:.9g}" for value in values],
         ])
 
     def _append_plot_sample(self, buf: list[float], value: float):
@@ -831,26 +1009,52 @@ class App(QtWidgets.QWidget):
     def _open_settings(self):
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle("Scope settings")
+        dialog.setStyleSheet(self.styleSheet())
+        dialog.setMinimumWidth(520)
         layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+
+        appearance_group = QtWidgets.QGroupBox("Appearance")
+        appearance_layout = QtWidgets.QFormLayout(appearance_group)
+        appearance_layout.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        appearance_layout.setFormAlignment(QtCore.Qt.AlignmentFlag.AlignLeft)
+        appearance_layout.setHorizontalSpacing(14)
+        appearance_layout.setVerticalSpacing(10)
+        theme_combo = QtWidgets.QComboBox()
+        theme_combo.addItem("Dark", "dark")
+        theme_combo.addItem("Light", "light")
+        theme_idx = theme_combo.findData(self._theme)
+        theme_combo.setCurrentIndex(max(0, theme_idx))
+        theme_combo.setMinimumWidth(180)
+        appearance_layout.addRow("Theme", theme_combo)
+        layout.addWidget(appearance_group)
 
         channels_group = QtWidgets.QGroupBox("Visible channels")
         channels_layout = QtWidgets.QGridLayout(channels_group)
+        channels_layout.setHorizontalSpacing(22)
+        channels_layout.setVerticalSpacing(8)
         channel_checks: list[QtWidgets.QCheckBox] = []
         for idx, label in enumerate(ADC_CHANNEL_LABELS):
             check = QtWidgets.QCheckBox(label)
             check.setChecked(self._channel_visible[idx])
+            check.setMinimumWidth(190)
             channel_checks.append(check)
             channels_layout.addWidget(check, idx // 2, idx % 2)
         layout.addWidget(channels_group)
 
         timing_group = QtWidgets.QGroupBox("Acquisition")
         timing_layout = QtWidgets.QFormLayout(timing_group)
+        timing_layout.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        timing_layout.setHorizontalSpacing(14)
+        timing_layout.setVerticalSpacing(12)
 
         sample_rate = QtWidgets.QComboBox()
         for label, rate_hz in ADS131M04_SAMPLE_RATES:
             sample_rate.addItem(label, rate_hz)
         sample_rate_idx = sample_rate.findData(self._sample_rate_hz)
         sample_rate.setCurrentIndex(max(0, sample_rate_idx))
+        sample_rate.setMinimumWidth(150)
         timing_layout.addRow("ADS131M04 rate", sample_rate)
 
         window_seconds = QtWidgets.QDoubleSpinBox()
@@ -859,12 +1063,16 @@ class App(QtWidgets.QWidget):
         window_seconds.setSingleStep(0.5)
         window_seconds.setSuffix(" s")
         window_seconds.setValue(self._window_seconds)
+        window_seconds.setMinimumWidth(150)
         timing_layout.addRow("Plot window", window_seconds)
 
         layout.addWidget(timing_group)
 
         filter_group = QtWidgets.QGroupBox("Display filter")
         filter_layout = QtWidgets.QFormLayout(filter_group)
+        filter_layout.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        filter_layout.setHorizontalSpacing(14)
+        filter_layout.setVerticalSpacing(10)
 
         lowpass_enabled = QtWidgets.QCheckBox("Butterworth low-pass")
         lowpass_enabled.setChecked(self._lowpass_enabled)
@@ -881,6 +1089,7 @@ class App(QtWidgets.QWidget):
         cutoff_spin.setRange(LOWPASS_MIN_CUTOFF_HZ, self._max_lowpass_cutoff_hz())
         cutoff_spin.setSuffix(" Hz")
         cutoff_spin.setValue(self._lowpass_cutoff_hz)
+        cutoff_spin.setMinimumWidth(110)
         cutoff_slider.valueChanged.connect(cutoff_spin.setValue)
         cutoff_spin.valueChanged.connect(cutoff_slider.setValue)
 
@@ -896,6 +1105,7 @@ class App(QtWidgets.QWidget):
         update_cutoff_range()
 
         cutoff_controls = QtWidgets.QHBoxLayout()
+        cutoff_controls.setSpacing(12)
         cutoff_controls.addWidget(cutoff_slider, 1)
         cutoff_controls.addWidget(cutoff_spin)
         filter_layout.addRow("Cutoff", cutoff_controls)
@@ -914,6 +1124,9 @@ class App(QtWidgets.QWidget):
             return
 
         self._channel_visible = [check.isChecked() for check in channel_checks]
+        selected_theme = str(theme_combo.currentData())
+        theme_changed = self._theme != selected_theme
+        self._theme = selected_theme
         self._window_seconds = float(window_seconds.value())
         new_sample_rate_hz = int(sample_rate.currentData())
         sample_rate_changed = self._sample_rate_hz != new_sample_rate_hz
@@ -931,6 +1144,8 @@ class App(QtWidgets.QWidget):
         self._max_plot_samples = self._window_sample_count()
         self._trim_plot_buffers()
         self._update_plot_visibility()
+        if theme_changed:
+            self._apply_theme()
         self._save_settings()
         if sample_rate_changed:
             self._clear_plot_buffers()
@@ -1096,14 +1311,13 @@ class App(QtWidgets.QWidget):
         # adc_data_t is packed: uint32 sample_count + int32 ch0 + ch1 + ch2 + ch3
         last_values = None
         for (sample_idx, ch0, ch1, ch2, ch3) in iter_structs("<Iiiii", payload):
-            counts = (ch0, ch1, ch2, ch3)
             values = [
                 adc_counts_to_volts(0, ch0),
                 adc_counts_to_volts(1, ch1),
                 adc_counts_to_volts(2, ch2),
                 adc_counts_to_volts(3, ch3),
             ]
-            self._record_adc_sample(sample_idx, counts, values)
+            self._record_adc_sample(sample_idx, values)
             last_values = values
             values = self._apply_lowpass(values)
             values = self._apply_notch(values)
@@ -1120,7 +1334,8 @@ class App(QtWidgets.QWidget):
         if self._recording_file is not None:
             self._recording_file.flush()
         if last_values is not None:
-            self._set_ui(adc="  ".join(f"CH{idx}: {value:.4f} V" for idx, value in enumerate(last_values)))
+            self._last_adc_values = last_values
+            self._set_ui(adc=self._format_adc_values(last_values))
 
     # BLE notification handlers are managed inside BleStreamThread
 
