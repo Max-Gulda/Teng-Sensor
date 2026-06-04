@@ -1,12 +1,16 @@
 import asyncio
+import csv
+from datetime import datetime
 import math
 import queue
 import struct
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, TextIO
 
 from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
 
@@ -217,12 +221,6 @@ CHANNEL_TRIM_GAIN = (1.0, 1.0, 1.0, 1.0)
 CHANNEL_TRIM_OFFSET_V = (0.0, 0.0, 0.0, 0.0)
 
 ADS131M04_SAMPLE_RATES = (
-    ("32 kSPS", 32000),
-    ("16 kSPS", 16000),
-    ("8 kSPS", 8000),
-    ("4 kSPS", 4000),
-    ("2 kSPS", 2000),
-    ("1 kSPS", 1000),
     ("500 SPS", 500),
     ("250 SPS", 250),
 )
@@ -249,6 +247,8 @@ SETTINGS_LOWPASS_ENABLED = "scope/lowpass_enabled"
 SETTINGS_LOWPASS_CUTOFF_HZ = "scope/lowpass_cutoff_hz"
 SETTINGS_NOTCH_ENABLED = "scope/notch_50hz_enabled"
 SETTINGS_ADS131_SAMPLE_RATE_HZ = "scope/ads131_sample_rate_hz"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+RECORDINGS_DIR = PROJECT_ROOT / "Recordings"
 
 
 @dataclass
@@ -354,6 +354,58 @@ class NotchFilter:
 
 
 class App(QtWidgets.QWidget):
+    @staticmethod
+    def _make_icon(draw_fn) -> QtGui.QIcon:
+        pixmap = QtGui.QPixmap(32, 32)
+        pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+        painter = QtGui.QPainter(pixmap)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        draw_fn(painter)
+        painter.end()
+        return QtGui.QIcon(pixmap)
+
+    @classmethod
+    def _make_record_dot_icon(cls) -> QtGui.QIcon:
+        def draw(painter: QtGui.QPainter):
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(QtGui.QColor("#ff3b30"))
+            painter.drawEllipse(QtCore.QPointF(16, 16), 7.5, 7.5)
+
+        return cls._make_icon(draw)
+
+    @classmethod
+    def _make_record_stop_icon(cls) -> QtGui.QIcon:
+        def draw(painter: QtGui.QPainter):
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            painter.setBrush(QtGui.QColor("#ff3b30"))
+            painter.drawRoundedRect(QtCore.QRectF(9, 9, 14, 14), 2, 2)
+
+        return cls._make_icon(draw)
+
+    @classmethod
+    def _disconnect_icon(cls) -> QtGui.QIcon:
+        def draw(painter: QtGui.QPainter):
+            pen = QtGui.QPen(QtGui.QColor("#d7d7d7"), 3.0, QtCore.Qt.PenStyle.SolidLine)
+            pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawLine(QtCore.QPointF(10, 10), QtCore.QPointF(22, 22))
+            painter.drawLine(QtCore.QPointF(22, 10), QtCore.QPointF(10, 22))
+
+        return cls._make_icon(draw)
+
+    @classmethod
+    def _settings_sliders_icon(cls) -> QtGui.QIcon:
+        def draw(painter: QtGui.QPainter):
+            pen = QtGui.QPen(QtGui.QColor("#d7d7d7"), 2.4, QtCore.Qt.PenStyle.SolidLine)
+            pen.setCapStyle(QtCore.Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            for y, knob_x in ((10, 20), (16, 12), (22, 17)):
+                painter.drawLine(QtCore.QPointF(7, y), QtCore.QPointF(25, y))
+                painter.setBrush(QtGui.QColor("#d7d7d7"))
+                painter.drawEllipse(QtCore.QPointF(knob_x, y), 2.8, 2.8)
+
+        return cls._make_icon(draw)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("TENG Sensor Scope (BLE, ADS131M04)")
@@ -365,6 +417,9 @@ class App(QtWidgets.QWidget):
         self._scan_thread: "ScanThread | None" = None
         self._reader: "BleStreamThread | None" = None
         self._settings = QtCore.QSettings(SETTINGS_ORG, SETTINGS_APP)
+        self._recording_file: TextIO | None = None
+        self._recording_writer: Any | None = None
+        self._recording_path: Path | None = None
 
         self._adc_ch0_buf: list[float] = []
         self._adc_ch1_buf: list[float] = []
@@ -377,6 +432,7 @@ class App(QtWidgets.QWidget):
             self._adc_ch3_buf,
         ]
         self._adc_sample_idx_buf: list[int] = []
+        self._plot_sample_idx = 0
         self._channel_visible = self._load_channel_visible()
         self._sample_rate_hz = self._load_ads131_sample_rate_hz()
         self._window_seconds = self._load_window_seconds()
@@ -403,43 +459,102 @@ class App(QtWidgets.QWidget):
         header = QtWidgets.QGridLayout()
         header.setColumnStretch(1, 1)
 
-        header.addWidget(QtWidgets.QLabel("Status:"), 0, 0)
+        self._lbl_status = QtWidgets.QLabel("Status:")
+        self._lbl_device = QtWidgets.QLabel("Device:")
+        self._lbl_device_combo = QtWidgets.QLabel("Found BLE devices:")
+        self._lbl_adc_note = QtWidgets.QLabel("ADC stream note:")
+        self._lbl_adc_last = QtWidgets.QLabel("Last ADC voltages:")
+
+        header.addWidget(self._lbl_status, 0, 0)
         header.addWidget(self._status, 0, 1)
-        header.addWidget(QtWidgets.QLabel("Device:"), 1, 0)
+        header.addWidget(self._lbl_device, 1, 0)
         header.addWidget(self._device, 1, 1)
 
-        header.addWidget(QtWidgets.QLabel("Found BLE devices:"), 2, 0)
+        header.addWidget(self._lbl_device_combo, 2, 0)
         self._device_combo = QtWidgets.QComboBox()
         self._device_combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents)
         header.addWidget(self._device_combo, 2, 1)
 
-        header.addWidget(QtWidgets.QLabel("ADC stream note:"), 3, 0)
+        header.addWidget(self._lbl_adc_note, 3, 0)
         header.addWidget(self._adc_note, 3, 1)
-        header.addWidget(QtWidgets.QLabel("Last ADC voltages:"), 4, 0)
+        header.addWidget(self._lbl_adc_last, 4, 0)
         header.addWidget(self._adc_last, 4, 1)
 
         buttons = QtWidgets.QHBoxLayout()
+        button_icon_size = QtCore.QSize(16, 16)
         self._btn_scan = QtWidgets.QPushButton("Scan")
-        self._btn_stream = QtWidgets.QPushButton("Start streaming")
-        self._btn_stop = QtWidgets.QPushButton("Stop")
+        self._btn_stream = QtWidgets.QPushButton("Connect")
+        self._btn_stop = QtWidgets.QPushButton("Disconnect")
+        self._btn_record = QtWidgets.QPushButton("Record")
+        self._btn_record.setCheckable(True)
         self._btn_settings = QtWidgets.QPushButton("Settings")
+        self._record_icon = self._make_record_dot_icon()
+        self._record_stop_icon = self._make_record_stop_icon()
+        self._btn_stop.setIcon(self._disconnect_icon())
+        self._btn_record.setIcon(self._record_icon)
+        self._btn_settings.setIcon(self._settings_sliders_icon())
+        for button in (
+            self._btn_scan,
+            self._btn_stream,
+            self._btn_stop,
+            self._btn_record,
+            self._btn_settings,
+        ):
+            button.setIconSize(button_icon_size)
+            button.setMinimumWidth(104)
+            button.setMinimumHeight(28)
+            button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(
+                """
+                QPushButton {
+                    background: #5a5a5a;
+                    border: 1px solid #666666;
+                    border-radius: 6px;
+                    color: #f2f2f2;
+                    font-weight: 600;
+                    padding: 5px 12px;
+                }
+                QPushButton:hover {
+                    background: #666666;
+                    border-color: #777777;
+                }
+                QPushButton:pressed {
+                    background: #4c4c4c;
+                }
+                QPushButton:disabled {
+                    background: #4a4a4a;
+                    border-color: #515151;
+                    color: #8c8c8c;
+                }
+                """
+            )
+        self._btn_record.setMinimumWidth(136)
         self._chk_ac_coupling = QtWidgets.QCheckBox("AC couple display")
         self._chk_ac_coupling.setChecked(self._load_bool(SETTINGS_AC_COUPLING, False))
+        self._chk_ac_coupling.setToolTip(
+            "Removes the slow DC offset from the plotted signal. CSV recordings keep the original calibrated values."
+        )
+        self._btn_stop.setToolTip("Disconnect from the current BLE device.")
+        self._btn_record.setToolTip("Save incoming ADC samples to a CSV file in Recordings.")
+        self._btn_settings.setToolTip("Open plot, sample rate, and display filter settings.")
 
         self._btn_scan.clicked.connect(self._on_scan)
         self._btn_stream.clicked.connect(self._on_start_streaming)
         self._btn_stop.clicked.connect(self._on_stop_streaming)
+        self._btn_record.toggled.connect(self._on_record_toggled)
         self._btn_settings.clicked.connect(self._open_settings)
         self._chk_ac_coupling.stateChanged.connect(lambda _state: self._save_settings())
 
         buttons.addWidget(self._btn_scan)
         buttons.addWidget(self._btn_stream)
         buttons.addWidget(self._btn_stop)
+        buttons.addWidget(self._btn_record)
         buttons.addWidget(self._btn_settings)
         buttons.addSpacing(16)
         buttons.addWidget(self._chk_ac_coupling)
         buttons.addStretch(1)
         self._btn_stop.setEnabled(False)
+        self._btn_record.setEnabled(False)
 
         plots = QtWidgets.QVBoxLayout()
         self._adc_plots: list[pg.PlotWidget] = []
@@ -466,6 +581,7 @@ class App(QtWidgets.QWidget):
         root.addLayout(header)
         root.addLayout(buttons)
         root.addLayout(plots)
+        QtCore.QTimer.singleShot(0, self._on_scan)
 
     def _log_line(self, msg: str):
         # Print logs to the launching terminal (stdout) instead of the GUI widget.
@@ -474,6 +590,7 @@ class App(QtWidgets.QWidget):
 
     def closeEvent(self, event):
         self._save_settings()
+        self._stop_recording()
         self._stop_streaming_thread()
         super().closeEvent(event)
 
@@ -573,6 +690,7 @@ class App(QtWidgets.QWidget):
         for buf in self._adc_buffers:
             buf.clear()
         self._adc_sample_idx_buf.clear()
+        self._plot_sample_idx = 0
         self._adc_lp = [0.0, 0.0, 0.0, 0.0]
 
     def _send_ads131_sample_rate(self):
@@ -587,6 +705,97 @@ class App(QtWidgets.QWidget):
             self._device.setText(device)
         if adc is not None:
             self._adc_last.setText(adc)
+
+    def _set_connection_info_collapsed(self, collapsed: bool):
+        for widget in (
+            self._lbl_status,
+            self._status,
+            self._lbl_device,
+            self._device,
+            self._lbl_device_combo,
+            self._device_combo,
+            self._lbl_adc_note,
+            self._adc_note,
+            self._lbl_adc_last,
+            self._adc_last,
+            self._btn_scan,
+            self._btn_stream,
+        ):
+            widget.setVisible(not collapsed)
+
+    def _on_record_toggled(self, checked: bool):
+        if checked:
+            self._start_recording()
+        else:
+            self._stop_recording()
+
+    def _start_recording(self):
+        if self._recording_writer is not None:
+            return
+        try:
+            RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = RECORDINGS_DIR / f"teng_recording_{timestamp}.csv"
+            handle = path.open("w", newline="", encoding="utf-8")
+            writer = csv.writer(handle)
+            writer.writerow([
+                "sample_index",
+                "ch0_counts",
+                "ch1_counts",
+                "ch2_counts",
+                "ch3_counts",
+                "ch0_volts",
+                "ch1_volts",
+                "ch2_volts",
+                "ch3_volts",
+            ])
+        except OSError as exc:
+            self._recording_file = None
+            self._recording_writer = None
+            self._recording_path = None
+            self._btn_record.blockSignals(True)
+            self._btn_record.setChecked(False)
+            self._btn_record.blockSignals(False)
+            self._set_ui(status=f"Recording failed: {exc}")
+            self._log_line(f"Recording failed: {exc}")
+            return
+
+        self._recording_file = handle
+        self._recording_writer = writer
+        self._recording_path = path
+        self._btn_record.setText("Stop recording")
+        self._btn_record.setIcon(self._record_stop_icon)
+        self._log_line(f"Recording to {path}")
+
+    def _stop_recording(self):
+        handle = self._recording_file
+        path = self._recording_path
+        self._recording_file = None
+        self._recording_writer = None
+        self._recording_path = None
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError as exc:
+                self._log_line(f"Failed to close recording: {exc}")
+            else:
+                if path is not None:
+                    self._log_line(f"Recording saved: {path}")
+        self._btn_record.blockSignals(True)
+        self._btn_record.setChecked(False)
+        self._btn_record.setText("Record")
+        self._btn_record.setIcon(self._record_icon)
+        self._btn_record.blockSignals(False)
+
+    def _record_adc_sample(self, sample_idx: int, counts: tuple[int, int, int, int], values: list[float]):
+        writer = self._recording_writer
+        if writer is None:
+            return
+        writer.writerow([
+            int(sample_idx),
+            *[int(count) for count in counts],
+            *[f"{value:.9g}" for value in values],
+        ])
 
     def _append_plot_sample(self, buf: list[float], value: float):
         buf.append(float(value))
@@ -782,10 +991,17 @@ class App(QtWidgets.QWidget):
         # devices: (address, name, rssi)
         self._scan_results = [(addr, name) for (addr, name, _rssi) in devices]
         self._device_combo.clear()
+        teng_scope_idx: int | None = None
         for addr, name, rssi in devices:
             label_name = (name or "").strip() or "Unknown"
             rssi_txt = f", RSSI {rssi} dBm" if isinstance(rssi, int) else ""
             self._device_combo.addItem(f"{label_name} ({addr}{rssi_txt})")
+            if label_name == "TENG_Scope":
+                teng_scope_idx = self._device_combo.count() - 1
+            elif teng_scope_idx is None and label_name.lower() == "teng_scope":
+                teng_scope_idx = self._device_combo.count() - 1
+        if teng_scope_idx is not None:
+            self._device_combo.setCurrentIndex(teng_scope_idx)
 
     # scanning is handled by ScanThread
 
@@ -798,7 +1014,13 @@ class App(QtWidgets.QWidget):
             self._btn_stream.setEnabled(True)
             self._btn_scan.setEnabled(True)
             self._btn_stop.setEnabled(False)
+            self._btn_record.setEnabled(False)
             return
+
+        self._btn_stream.setEnabled(False)
+        self._btn_scan.setEnabled(False)
+        self._btn_stop.setEnabled(True)
+        self._btn_record.setEnabled(False)
 
         # Reset plots on new stream
         self._clear_plot_buffers()
@@ -829,17 +1051,28 @@ class App(QtWidgets.QWidget):
         self._btn_stream.setEnabled(True)
         self._btn_scan.setEnabled(True)
         self._btn_stop.setEnabled(False)
+        self._btn_record.setEnabled(False)
+        self._set_connection_info_collapsed(False)
+        self._stop_recording()
 
     @QtCore.Slot(bool)
     def _on_stream_connection_changed(self, connected: bool):
         self._streaming = bool(connected)
         if connected:
             self._set_ui(status="Streaming")
+            self._btn_stream.setEnabled(False)
+            self._btn_scan.setEnabled(False)
+            self._btn_stop.setEnabled(True)
+            self._btn_record.setEnabled(True)
+            self._set_connection_info_collapsed(True)
         else:
             self._set_ui(status="Disconnected")
             self._btn_stream.setEnabled(True)
             self._btn_scan.setEnabled(True)
             self._btn_stop.setEnabled(False)
+            self._btn_record.setEnabled(False)
+            self._set_connection_info_collapsed(False)
+            self._stop_recording()
 
     @QtCore.Slot(str)
     def _on_stream_device_name(self, name: str):
@@ -863,12 +1096,14 @@ class App(QtWidgets.QWidget):
         # adc_data_t is packed: uint32 sample_count + int32 ch0 + ch1 + ch2 + ch3
         last_values = None
         for (sample_idx, ch0, ch1, ch2, ch3) in iter_structs("<Iiiii", payload):
+            counts = (ch0, ch1, ch2, ch3)
             values = [
                 adc_counts_to_volts(0, ch0),
                 adc_counts_to_volts(1, ch1),
                 adc_counts_to_volts(2, ch2),
                 adc_counts_to_volts(3, ch3),
             ]
+            self._record_adc_sample(sample_idx, counts, values)
             last_values = values
             values = self._apply_lowpass(values)
             values = self._apply_notch(values)
@@ -876,11 +1111,14 @@ class App(QtWidgets.QWidget):
                 for idx, sample in enumerate(values):
                     self._adc_lp[idx] += self._ac_coupling_alpha * (sample - self._adc_lp[idx])
                     values[idx] = sample - self._adc_lp[idx]
-            self._adc_sample_idx_buf.append(int(sample_idx))
+            self._adc_sample_idx_buf.append(self._plot_sample_idx)
+            self._plot_sample_idx += 1
             if len(self._adc_sample_idx_buf) > self._max_plot_samples:
                 del self._adc_sample_idx_buf[: len(self._adc_sample_idx_buf) - self._max_plot_samples]
             for buf, value in zip(self._adc_buffers, values):
                 self._append_plot_sample(buf, value)
+        if self._recording_file is not None:
+            self._recording_file.flush()
         if last_values is not None:
             self._set_ui(adc="  ".join(f"CH{idx}: {value:.4f} V" for idx, value in enumerate(last_values)))
 
