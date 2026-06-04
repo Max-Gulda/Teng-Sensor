@@ -5,6 +5,7 @@ from html import escape
 import math
 import queue
 import struct
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
@@ -252,6 +253,14 @@ SETTINGS_ADS131_SAMPLE_RATE_HZ = "scope/ads131_sample_rate_hz"
 SETTINGS_THEME = "scope/theme"
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 RECORDINGS_DIR = PROJECT_ROOT / "Recordings"
+APP_DISPLAY_NAME = "TENG Sensor Scope"
+APP_WINDOW_TITLE = APP_DISPLAY_NAME
+APP_DESKTOP_FILE_NAME = "teng-sensor-scope"
+APP_USER_MODEL_ID = "TengSensor.Scope"
+APP_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+APP_ICON_SVG_PATH = APP_ASSETS_DIR / "teng-sensor-scope.svg"
+APP_ICON_PNG_PATH = APP_ASSETS_DIR / "teng-sensor-scope.png"
+APP_ICON_ICO_PATH = APP_ASSETS_DIR / "teng-sensor-scope.ico"
 
 
 @dataclass
@@ -356,6 +365,80 @@ class NotchFilter:
         return out
 
 
+def load_app_icon() -> QtGui.QIcon:
+    if APP_ICON_SVG_PATH.exists():
+        return QtGui.QIcon(str(APP_ICON_SVG_PATH))
+    if APP_ICON_PNG_PATH.exists():
+        return QtGui.QIcon(str(APP_ICON_PNG_PATH))
+    if APP_ICON_ICO_PATH.exists():
+        return QtGui.QIcon(str(APP_ICON_ICO_PATH))
+    return QtGui.QIcon()
+
+
+def apply_windows_taskbar_identity() -> None:
+    if sys.platform != "win32":
+        return
+
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
+
+
+def apply_macos_process_name() -> None:
+    if sys.platform != "darwin":
+        return
+
+    try:
+        from Foundation import NSProcessInfo
+
+        NSProcessInfo.processInfo().setProcessName_(APP_DISPLAY_NAME)
+    except Exception:
+        pass
+
+
+def apply_macos_dock_identity(icon_path: Path) -> None:
+    if sys.platform != "darwin" or not icon_path.exists():
+        return
+
+    try:
+        from AppKit import NSApplication, NSApplicationActivationPolicyRegular, NSImage
+        from Foundation import NSBundle
+
+        apply_macos_process_name()
+
+        bundle = NSBundle.mainBundle()
+        info = bundle.localizedInfoDictionary() or bundle.infoDictionary()
+        if info is not None:
+            info["CFBundleName"] = APP_DISPLAY_NAME
+            info["CFBundleDisplayName"] = APP_DISPLAY_NAME
+
+        app = NSApplication.sharedApplication()
+        app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        image = NSImage.alloc().initWithContentsOfFile_(str(icon_path))
+        if image is not None:
+            app.setApplicationIconImage_(image)
+    except Exception:
+        pass
+
+
+def configure_application(qapp: QtWidgets.QApplication) -> QtGui.QIcon:
+    apply_windows_taskbar_identity()
+    QtCore.QCoreApplication.setOrganizationName(SETTINGS_ORG)
+    QtCore.QCoreApplication.setApplicationName(APP_DISPLAY_NAME)
+    qapp.setApplicationDisplayName(APP_DISPLAY_NAME)
+    qapp.setDesktopFileName(APP_DESKTOP_FILE_NAME)
+
+    app_icon = load_app_icon()
+    if not app_icon.isNull():
+        qapp.setWindowIcon(app_icon)
+        macos_icon_path = APP_ICON_PNG_PATH if APP_ICON_PNG_PATH.exists() else APP_ICON_SVG_PATH
+        apply_macos_dock_identity(macos_icon_path)
+    return app_icon
+
+
 class App(QtWidgets.QWidget):
     @staticmethod
     def _make_icon(draw_fn) -> QtGui.QIcon:
@@ -411,7 +494,8 @@ class App(QtWidgets.QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("TENG Sensor Scope (BLE, ADS131M04)")
+        self.setWindowTitle(APP_WINDOW_TITLE)
+        self.setWindowIcon(QtWidgets.QApplication.windowIcon())
         self.resize(900, 700)
 
         self.state = UiState()
@@ -1341,7 +1425,9 @@ class App(QtWidgets.QWidget):
 
 
 def main():
-    qapp = QtWidgets.QApplication([])
+    apply_macos_process_name()
+    qapp = QtWidgets.QApplication([APP_DISPLAY_NAME])
+    configure_application(qapp)
     w = App()
     w.show()
     qapp.exec()
